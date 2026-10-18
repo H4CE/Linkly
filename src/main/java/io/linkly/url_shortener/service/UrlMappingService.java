@@ -37,6 +37,16 @@ public class UrlMappingService {
     @Value("${app.base-url}")
     private String baseUrl;
 
+    @Transactional(readOnly = true)
+    public List<ShortenResponse> getCurrentUserMappings() {
+        User currentUser = getCurrentUser();
+        return urlMappingRepository
+                .findAllByUserIdOrderByCreatedAtDescIdDesc(currentUser.getId())
+                .stream()
+                .map(this::buildShortenResponse)
+                .toList();
+    }
+
     // ── Suggest ──────────────────────────────────────────────────────────
 
     public SuggestResponse suggest(SuggestRequest request) {
@@ -181,7 +191,7 @@ public class UrlMappingService {
                 : List.of();
 
         return ShortenResponse.builder()
-                .shortUrl(baseUrl + "/" + mapping.getShortCode())
+                .shortUrl(baseUrl + "/api/urls/" + mapping.getShortCode())
                 .originalUrl(mapping.getOriginalUrl())
                 .createdAt(mapping.getCreatedAt())
                 .expiresAt(mapping.getExpiresAt())

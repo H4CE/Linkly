@@ -46,6 +46,16 @@ public class UrlMappingController {
     }
 
     @Operation(
+            summary = "List the current user's saved URLs",
+            description = "Returns only the authenticated user's URL mappings, newest first, " +
+                    "including the full original URL, short URL and metadata."
+    )
+    @GetMapping
+    public ResponseEntity<List<ShortenResponse>> listMyUrls() {
+        return ResponseEntity.ok(urlMappingService.getCurrentUserMappings());
+    }
+
+    @Operation(
             summary = "Suggest a short URL slug",
             description = "Uses Google Gemini AI to generate a meaningful slug for the given URL. " +
                     "Returns a suggested short URL and a verification token. " +

@@ -44,6 +44,7 @@ A production-grade URL shortener built with **Spring Boot 3.5** and **Java 21**,
 |---|---|---|---|
 | POST | `/api/auth/register` | Public | Register a new user |
 | POST | `/api/auth/login` | Public | Login and get JWT token |
+| GET | `/api/urls` | Protected | List the logged-in user's saved URLs, newest first |
 | GET | `/api/urls/{shortCode}` | Public | Redirect to original URL |
 | POST | `/api/urls/suggest` | Protected | AI generates slug suggestion |
 | POST | `/api/urls/regenerate` | Protected | Get a new slug suggestion |
@@ -58,6 +59,14 @@ A production-grade URL shortener built with **Spring Boot 3.5** and **Java 21**,
 2. POST /api/urls/regenerate → Get new slug if unhappy (optional)
 3. POST /api/urls/confirm    → Verify token + spam check + save to DB
 ```
+
+### List your saved links
+
+Send `GET /api/urls` with `Authorization: Bearer <your-jwt>` to retrieve all of
+your saved mappings, newest first. Each entry includes the full `originalUrl`,
+the working `shortUrl`, creation/expiry timestamps, click count, tags and category.
+The user is determined from the JWT; a user ID is not accepted as an ownership
+selector. Users with no saved mappings receive `200 OK` with an empty array.
 
 ---
 
@@ -116,10 +125,11 @@ http://localhost:8080/swagger-ui.html
 mvn test
 ```
 
-**46 automated tests** covering:
+**56 automated tests** covering:
 - Unit tests — Base62 encoder, HMAC verification util
 - Integration tests — Full HTTP flow via MockMvc against H2
 - Security tests — JWT enforcement on protected endpoints
+- URL listing tests — ownership isolation, empty lists, unchanged clicks, and usable short links
 - AI service tests — Gemini API mocked with WireMock
 
 ---
