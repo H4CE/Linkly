@@ -2,9 +2,15 @@ package io.linkly.url_shortener.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.linkly.url_shortener.config.TestCacheConfig;
+import io.linkly.url_shortener.entity.UrlMapping;
+import io.linkly.url_shortener.entity.User;
+import io.linkly.url_shortener.repository.UrlMappingRepository;
+import io.linkly.url_shortener.repository.UserRepository;
 import io.linkly.url_shortener.service.AiService;
 import io.linkly.url_shortener.service.RateLimitService;
+import io.linkly.url_shortener.util.Base62Encoder;
 import io.linkly.url_shortener.util.SlugVerificationUtil;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -17,12 +23,23 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
-import org.springframework.transaction.annotation.Transactional;
 
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -30,10 +47,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 
-@SpringBootTest
+@SpringBootTest(properties = "spring.datasource.url=jdbc:h2:mem:urlMappingControllerTest;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE")
 @AutoConfigureMockMvc
 @Import(TestCacheConfig.class)
-@Transactional
 class UrlMappingControllerTest {
 
     @Autowired
@@ -47,6 +63,15 @@ class UrlMappingControllerTest {
 
     @Autowired
     private CacheManager cacheManager;
+
+    @Autowired
+    private UrlMappingRepository urlMappingRepository;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private Base62Encoder base62Encoder;
 
     @MockitoBean
     private AiService aiService;
@@ -92,6 +117,16 @@ class UrlMappingControllerTest {
                 .thenReturn(new AiService.AiTagResult(
                         List.of("java", "spring", "backend"),
                         "Technology"));
+    }
+
+    @AfterEach
+    void tearDown() {
+        // Creation owns real transactions so collision retries can be tested after
+        // rollback. Clean the isolated H2 database explicitly instead of wrapping
+        // each test in a transaction that would hide users from REQUIRES_NEW.
+        cacheManager.getCache("urls").clear();
+        urlMappingRepository.deleteAll();
+        userRepository.deleteAll();
     }
 
     // ── Suggest tests ─────────────────────────────────────────────────
@@ -167,6 +202,141 @@ class UrlMappingControllerTest {
                 .andExpect(jsonPath("$.originalUrl").value(TEST_URL))
                 .andExpect(jsonPath("$.tags").isArray())
                 .andExpect(jsonPath("$.category").value("Technology"));
+    }
+
+    @Test
+    @DisplayName("a slug owned by another user creates one suffixed mapping and preserves both links")
+    void confirm_takenSlug_createsOneMappingAndPreservesExistingLink() throws Exception {
+        User currentUser = userRepository.findByEmail("testuser@gmail.com").orElseThrow();
+        User otherUser = userRepository.saveAndFlush(User.builder()
+                .email("other-owner@example.com")
+                .password(currentUser.getPassword())
+                .build());
+        UrlMapping original = saveMapping(otherUser, TEST_SLUG, "https://example.com/original");
+        original.setClickCount(9L);
+        urlMappingRepository.saveAndFlush(original);
+
+        String shortUrl = confirmUrl(TEST_URL, TEST_SLUG);
+
+        List<UrlMapping> ownedMappings = urlMappingRepository
+                .findAllByUserIdOrderByCreatedAtDescIdDesc(currentUser.getId());
+        assertEquals(2L, urlMappingRepository.count());
+        assertEquals(1, ownedMappings.size());
+        UrlMapping created = ownedMappings.getFirst();
+        assertEquals(TEST_SLUG + "-" + base62Encoder.encode(created.getId()), created.getShortCode());
+        assertEquals(TEST_URL, created.getOriginalUrl());
+        assertEquals("java,spring,backend", created.getTags());
+        assertEquals("Technology", created.getCategory());
+        assertEquals(0L, created.getClickCount());
+        assertEquals("http://localhost:8080/api/urls/" + created.getShortCode(), shortUrl);
+
+        UrlMapping preserved = urlMappingRepository.findById(original.getId()).orElseThrow();
+        assertEquals(TEST_SLUG, preserved.getShortCode());
+        assertEquals("https://example.com/original", preserved.getOriginalUrl());
+        assertEquals(otherUser.getId(), preserved.getUser().getId());
+        assertEquals(9L, preserved.getClickCount());
+
+        mockMvc.perform(get(URI.create(shortUrl).getPath()))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", TEST_URL));
+        mockMvc.perform(get("/api/urls/" + TEST_SLUG))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "https://example.com/original"));
+    }
+
+    @Test
+    @DisplayName("repeated confirmations create one distinct link per request without temporary rows")
+    void confirm_repeatedSlug_createsExactlyOneMappingPerRequest() throws Exception {
+        Set<String> shortUrls = new HashSet<>();
+        for (int request = 0; request < 3; request++) {
+            shortUrls.add(confirmUrl(TEST_URL, TEST_SLUG));
+        }
+
+        assertEquals(3, shortUrls.size());
+        assertEquals(3L, urlMappingRepository.count());
+        assertTrue(shortUrls.contains("http://localhost:8080/api/urls/" + TEST_SLUG));
+        assertTrue(urlMappingRepository.findAll().stream()
+                .allMatch(mapping -> mapping.getShortCode().startsWith(TEST_SLUG)));
+    }
+
+    @Test
+    @DisplayName("a collision with a 100-character slug leaves room for the Base62 suffix")
+    void confirm_maximumLengthSlug_keepsFinalCodeWithinColumnLimit() throws Exception {
+        String requestedSlug = "a".repeat(100);
+        User currentUser = userRepository.findByEmail("testuser@gmail.com").orElseThrow();
+        saveMapping(currentUser, requestedSlug, "https://example.com/original");
+
+        String shortUrl = confirmUrl(TEST_URL, requestedSlug);
+        String finalCode = URI.create(shortUrl).getPath().substring("/api/urls/".length());
+        UrlMapping created = urlMappingRepository.findByShortCode(finalCode).orElseThrow();
+        String suffix = "-" + base62Encoder.encode(created.getId());
+
+        assertEquals(100, finalCode.length());
+        assertEquals("a".repeat(100 - suffix.length()) + suffix, finalCode);
+        assertEquals(2L, urlMappingRepository.count());
+        assertEquals(TEST_URL, created.getOriginalUrl());
+    }
+
+    @Test
+    @DisplayName("an occupied hybrid code rolls back and retries with a fresh ID")
+    void confirm_occupiedHybridCode_retriesAfterRollback() throws Exception {
+        User currentUser = userRepository.findByEmail("testuser@gmail.com").orElseThrow();
+        saveMapping(currentUser, TEST_SLUG, "https://example.com/original");
+        UrlMapping blocker = saveMapping(currentUser, "blocker", "https://example.com/blocker");
+
+        // Reserve the suffix the next identity allocation would produce. This
+        // forces a real database uniqueness failure rather than just a precheck.
+        long blockedId = blocker.getId() + 1;
+        String occupiedCode = TEST_SLUG + "-" + base62Encoder.encode(blockedId);
+        blocker.setShortCode(occupiedCode);
+        urlMappingRepository.saveAndFlush(blocker);
+
+        String shortUrl = confirmUrl(TEST_URL, TEST_SLUG);
+        String finalCode = URI.create(shortUrl).getPath().substring("/api/urls/".length());
+        UrlMapping created = urlMappingRepository.findByShortCode(finalCode).orElseThrow();
+
+        assertEquals(3L, urlMappingRepository.count());
+        assertTrue(created.getId() > blockedId);
+        assertNotEquals(occupiedCode, finalCode);
+        assertEquals(TEST_SLUG + "-" + base62Encoder.encode(created.getId()), finalCode);
+        assertEquals("https://example.com/blocker", urlMappingRepository
+                .findByShortCode(occupiedCode).orElseThrow().getOriginalUrl());
+        assertTrue(urlMappingRepository.findAll().stream()
+                .noneMatch(mapping -> mapping.getShortCode().startsWith("pending_")));
+        verify(aiService, times(1)).checkIfSafe(TEST_URL);
+        verify(aiService, times(1)).generateTags(TEST_URL);
+    }
+
+    @Test
+    @DisplayName("simultaneous confirmations of one slug each produce a distinct saved link")
+    void confirm_concurrentSameSlug_createsDistinctMappings() throws Exception {
+        int requestCount = 4;
+        CountDownLatch ready = new CountDownLatch(requestCount);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<String>> responses = new ArrayList<>();
+
+        try (var executor = Executors.newFixedThreadPool(requestCount)) {
+            for (int request = 0; request < requestCount; request++) {
+                responses.add(executor.submit(() -> {
+                    ready.countDown();
+                    assertTrue(start.await(10, TimeUnit.SECONDS));
+                    return confirmUrl(TEST_URL, TEST_SLUG);
+                }));
+            }
+
+            assertTrue(ready.await(10, TimeUnit.SECONDS));
+            start.countDown();
+
+            Set<String> shortUrls = new HashSet<>();
+            for (Future<String> response : responses) {
+                shortUrls.add(response.get(15, TimeUnit.SECONDS));
+            }
+            assertEquals(requestCount, shortUrls.size());
+        }
+
+        assertEquals(requestCount, urlMappingRepository.count());
+        assertTrue(urlMappingRepository.findAll().stream()
+                .allMatch(mapping -> mapping.getShortCode().startsWith(TEST_SLUG)));
     }
 
     @Test
@@ -285,4 +455,24 @@ class UrlMappingControllerTest {
                 .andExpect(status().isFound());
     }
 
+    private String confirmUrl(String originalUrl, String slug) throws Exception {
+        String response = mockMvc.perform(post("/api/urls/confirm")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "originalUrl", originalUrl,
+                                "slug", slug,
+                                "verificationToken", slugVerificationUtil.generateToken(originalUrl, slug)))))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        return objectMapper.readTree(response).path("shortUrl").asText();
+    }
+
+    private UrlMapping saveMapping(User owner, String shortCode, String originalUrl) {
+        return urlMappingRepository.saveAndFlush(UrlMapping.builder()
+                .user(owner)
+                .shortCode(shortCode)
+                .originalUrl(originalUrl)
+                .build());
+    }
 }

@@ -10,7 +10,6 @@ import io.linkly.url_shortener.entity.User;
 import io.linkly.url_shortener.exception.UrlNotFoundException;
 import io.linkly.url_shortener.repository.UrlMappingRepository;
 import io.linkly.url_shortener.repository.UserRepository;
-import io.linkly.url_shortener.util.Base62Encoder;
 import io.linkly.url_shortener.util.SlugVerificationUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,7 +29,7 @@ public class UrlMappingService {
 
     private final UrlMappingRepository urlMappingRepository;
     private final UserRepository userRepository;
-    private final Base62Encoder base62Encoder;
+    private final UrlMappingCreationService urlMappingCreationService;
     private final AiService aiService;
     private final SlugVerificationUtil slugVerificationUtil;
 
@@ -95,7 +94,6 @@ public class UrlMappingService {
 
     // ── Confirm ──────────────────────────────────────────────────────────
     @CacheEvict(value = "urls", key = "#request.slug")
-    @Transactional
     public ShortenResponse confirm(ConfirmShortenRequest request) {
 
         // Step 1 — verify slug was AI generated
@@ -116,24 +114,17 @@ public class UrlMappingService {
             throw new RuntimeException("This URL has been flagged as unsafe");
         }
 
-        // Step 3 — resolve final slug
-        String finalSlug = resolveFinalSlug(request.getSlug(), request.getOriginalUrl());
-
-        // Step 4 — generate tags
+        // Finish the external AI calls before opening a database creation transaction.
+        // This also avoids repeating paid AI calls when a slug collision needs a retry.
         AiService.AiTagResult tagResult = aiService.generateTags(request.getOriginalUrl());
 
-        // Step 5 — save to DB
+        // The creation service saves and returns ONE mapping, including any slug suffix.
+        // Do not build another UrlMapping here: that was the duplicate-slug bug.
         User currentUser = getCurrentUser();
-        UrlMapping mapping = UrlMapping.builder()
-                .originalUrl(request.getOriginalUrl())
-                .shortCode(finalSlug)
-                .user(currentUser)
-                .tags(String.join(",", tagResult.tags()))
-                .category(tagResult.category())
-                .build();
-        mapping = urlMappingRepository.save(mapping);
+        UrlMapping mapping = urlMappingCreationService.createMapping(
+                request.getOriginalUrl(), request.getSlug(), currentUser,
+                String.join(",", tagResult.tags()), tagResult.category());
 
-        // Step 6 — build response
         return buildShortenResponse(mapping);
     }
 
@@ -162,28 +153,6 @@ public class UrlMappingService {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
-
-    private String resolveFinalSlug(String requestedSlug, String originalUrl) {
-        // Slug is available — use it directly
-        if (!urlMappingRepository.existsByShortCode(requestedSlug)) {
-            return requestedSlug;
-        }
-
-        // Slug is taken — save temp entry to get DB id, then append Base62
-        UrlMapping temp = UrlMapping.builder()
-                .originalUrl(originalUrl)
-                .shortCode("temp_" + System.currentTimeMillis())
-                .user(getCurrentUser())
-                .build();
-        temp = urlMappingRepository.save(temp);
-
-        String hybridSlug = requestedSlug + "-" + base62Encoder.encode(temp.getId());
-
-        temp.setShortCode(hybridSlug);
-        urlMappingRepository.save(temp);
-
-        return hybridSlug;
-    }
 
     private ShortenResponse buildShortenResponse(UrlMapping mapping) {
         List<String> tags = mapping.getTags() != null && !mapping.getTags().isEmpty()

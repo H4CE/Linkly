@@ -125,11 +125,12 @@ http://localhost:8080/swagger-ui.html
 mvn test
 ```
 
-**56 automated tests** covering:
+**61 automated tests** covering:
 - Unit tests — Base62 encoder, HMAC verification util
 - Integration tests — Full HTTP flow via MockMvc against H2
 - Security tests — JWT enforcement on protected endpoints
 - URL listing tests — ownership isolation, empty lists, unchanged clicks, and usable short links
+- Slug collision tests — repeated and concurrent confirmations, retry rollback, ownership preservation, and maximum-length codes
 - AI service tests — Gemini API mocked with WireMock
 
 ---
@@ -156,7 +157,7 @@ src/main/java/io/linkly/url_shortener/
 ## Architecture Decisions
 
 **Why Base62 encoding?**
-Auto-incremented database IDs encoded in Base62 give guaranteed-unique, URL-safe short codes without randomness or collision risk. 6 characters → 56 billion combinations.
+When an AI slug is already taken, Linkly appends the Base62 encoding of the new mapping's database ID. The same mapping is updated and returned, so each successful confirmation creates exactly one row. The database's unique constraint remains authoritative; a conflicting save is rolled back and retried in a fresh transaction, up to three attempts. Long slugs are shortened to leave room for the suffix within the 100-character column limit.
 
 **Why a suggest → confirm flow?**
 Separating suggestion from saving allows users to regenerate slugs without creating wasted DB entries. URLs are only saved when the user explicitly confirms.
