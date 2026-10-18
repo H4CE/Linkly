@@ -1,205 +1,52 @@
-# Linkly — AI-powered URL shortener
+# Linkly
 
-Linkly is a Spring Boot 3.5 / Java 21 REST API with PostgreSQL persistence, JWT authentication, Gemini slug suggestions, HMAC verification, and Redis caching and rate limits.
+Linkly is a URL shortener built with **Java 21, Spring Boot, PostgreSQL, and Redis**. It provides a REST API with JWT authentication and an interactive Swagger UI for trying it locally.
 
-## API
+Users can:
 
-| Method | Route | Authentication | Purpose |
-|---|---|---|---|
-| POST | `/api/auth/register` | Public | Register and receive a JWT |
-| POST | `/api/auth/login` | Public | Log in and receive a JWT |
-| POST | `/api/urls/shorten` | Bearer JWT | Save a random code without AI or destination-content checks |
-| POST | `/api/urls/suggest` | Bearer JWT | Suggest a slug without saving |
-| POST | `/api/urls/regenerate` | Bearer JWT | Replace a signed suggestion |
-| POST | `/api/urls/confirm` | Bearer JWT | Verify, check safety, tag and save |
-| GET | `/api/urls` | Bearer JWT | List your saved links, newest first |
-| GET | `/api/urls/{shortCode}` | Public | Count the visit and return a 302 redirect |
-| GET | `/actuator/health`, `/actuator/info` | Public | Health / metadata |
-| GET | `/actuator/metrics` | Bearer JWT | Enabled metrics |
+- Create a short link immediately with a random code, without an AI key.
+- Use Gemini to suggest readable slugs, assess destination content when confirming, and add tags and a category.
+- View their saved original and short URLs, with click counts.
+- Share public short links that redirect to the original destination.
 
-See [API_REFERENCE.md](API_REFERENCE.md) for request bodies, responses and a copyable PowerShell workflow. Swagger UI: [localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html).
+**Basic shortening does not check destination content or classify spam.** The AI flow requires a working Gemini key; basic shortening, authentication, listing, and existing-link redirects work without one.
 
-AI shortening flow: **suggest → optionally regenerate → confirm**. Use the exact original URL, slug and verification token from the same response. A preview uses the real redirect path but becomes active only after confirmation. A collision may change the final code, so use the confirmed `shortUrl`.
+## Start locally on Windows
 
-## Basic shortening and AI content assessment
-
-For the interview demo, there are two creation flows:
-
-- **Basic:** `POST /api/urls/shorten` accepts only `originalUrl`, validates HTTP(S) URL syntax, and saves a random 10-character Base62 code (a collision can append an ID suffix). It does not fetch the URL, assess its contents, call Gemini, or classify it as spam/safe. No Gemini key or verification token is needed. Tags are empty and category is `Uncategorized`.
-- **AI:** suggest/regenerate generate readable slugs. Confirmation downloads the destination, prepares up to 12,000 characters of page context, and asks Gemini for the safety/spam decision. Gemini alone makes that content assessment; handwritten spam/content rules are not applied. A working Gemini key is required for this flow.
-
-Example basic request (with a login/register JWT in the Authorization header):
-
-```http
-POST /api/urls/shorten
-Authorization: Bearer <your-jwt>
-Content-Type: application/json
-
-{"originalUrl":"https://example.com"}
-```
-
-Use the returned `shortUrl` to redirect, and `GET /api/urls` to see the saved mapping and click count. Basic creation does not require the destination to be reachable: downloads, private links or unavailable websites can be shortened if the URL syntax is valid. This provides **no content or spam protection**. PostgreSQL and Redis rate limiting are still required.
-
-### How AI receives page content
-
-For AI confirmation, Java downloads bounded HTML/plain text. Jsoup extracts visible text and HTML form/redirect/script excerpts so Gemini can see information which plain text alone would omit. Parsing never executes scripts or downloads images, frames, linked scripts or other assets. Java prepares the evidence without using form destinations, field names, redirects, script patterns or file signatures to make a spam verdict.
-
-The AI downloader allows public HTTP on port 80 or HTTPS on port 443, with normal TLS certificate validation. Each HTTP redirect is validated, DNS answers are checked and pinned to the connection, and localhost/private/special-use destinations are blocked. No caller Authorization header or cookies are forwarded. Limits: an eight-second total fetch deadline, two-second connection/read timeouts, at most three redirects, a 1 MiB decompressed response, and four concurrent fetches. These guards protect the downloader; they do not classify the webpage as spam, and they do not run for basic shortening.
-
-In the AI flow, a blocked fetch target or an unsafe/ambiguous Gemini result returns **400**. Unsupported files, oversized/empty pages, unsuccessful HTTP responses (including bot blocking), unresolved hosts and redirect loops return **422**. Fetch/TLS failures, timeouts, busy fetching or unavailable Gemini return **503**. No mapping is saved if required fetching or AI assessment cannot finish. In basic mode, content-related failures do not apply because there is no content fetch or assessment.
-
-Gemini receives excerpts rather than an entire site or rendered browser state. AI assessment can be wrong, and it does not cover later content changes or previously saved links. A successful basic response carries no safety verdict; a successful AI confirmation means Gemini approved the fetched context at creation time, not that the destination is guaranteed safe.
-
-## Run with Docker on Windows
-
-Run these commands from the folder containing `pom.xml` and `docker-compose.yml`. Docker Desktop must be running; Java, Maven and a separate Linux distribution are unnecessary.
-
-1. Copy `.env.example` to `.env`:
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-2. Generate your signing secrets by double-clicking `generate-secrets.cmd` in the project root, or run it in PowerShell:
-   ```powershell
-   .\generate-secrets.cmd
-   ```
-   Copy the printed `JWT_SECRET=...` and `VERIFICATION_SECRET=...` lines into `.env`, replacing the examples. The helper uses Windows PowerShell's cryptographic random generator to create two independent 48-byte secrets (64 Base64 characters each). It only prints them; it does not create or modify `.env`. Use `--no-pause` when running it from automation.
-
-   Choose a strong `DB_PASSWORD` for a fresh database. Docker sets that password when it initializes PostgreSQL; no manual database creation is needed. **Only these three values are required in `.env` for Docker startup:**
-
-   ```dotenv
-   DB_PASSWORD=your-database-password
-   JWT_SECRET=your-generated-jwt-secret
-   VERIFICATION_SECRET=your-generated-verification-secret
-   ```
-
-   **`GEMINI_API_KEY` is optional:** omit it or leave it empty. Registration, login, basic shortening, listing and existing-link redirects work without it. AI suggestion, regeneration and confirmation require a working key and otherwise return `503`.
-3. Start:
-   ```powershell
-   docker compose up --build -d
-   docker compose logs -f app
-   ```
-4. Open Swagger UI and try register → basic shorten → redirect → list. With a Gemini key configured, you can also try suggest → confirm.
-
-Host ports: application **8080**, PostgreSQL **5433**, Redis **6380**. Containers communicate internally on 5432 / 6379. PostgreSQL data persists in the named volume.
-
-**Existing installations:** `DB_PASSWORD` must match the password already stored in your PostgreSQL volume. Changing the variable alone does not change an existing database's password. Set the matching value; do not delete your data to fix a credentials mismatch. Changing signing secrets invalidates old JWTs / suggestion tokens.
-
-Keep signing secrets private and use different values for different installations. Someone who knows `JWT_SECRET` can forge signed login tokens; someone who knows `VERIFICATION_SECRET` can forge URL/slug verification tokens. JWT payloads are encoded, not encrypted, so their contents can already be read without the signing secret. The signing secret protects authenticity. Never commit generated values; `.env` is excluded from Git.
-
-Tracked `application.yaml` supplies the configuration for a clean clone. The Docker build excludes ignored local `application.properties` and `.env` files, so personal credentials are not bundled into the image. Compose supplies secrets at runtime.
-
-## Run Java locally, without putting the app in Docker
-
-Install Java 21 and PostgreSQL, create a database named `url_shortener`, and make Redis available. On Windows, Redis can run in Docker while Java runs directly on Windows:
+Install Docker Desktop with Linux containers enabled. Run the following from the folder containing `docker-compose.yml`, or double-click **`start-linkly.cmd`**:
 
 ```powershell
-docker compose up -d redis
-docker compose exec redis redis-cli ping
+.\start-linkly.cmd
 ```
 
-The last command should return `PONG`. Compose reads the project's `.env`, so configure it as above first. Alternatively, run a standalone Redis container on an unused port:
+The script starts Docker Desktop if needed, generates a random database password and two independent signing secrets, writes them to `.env`, and builds and starts PostgreSQL, Redis, and Linkly. It waits for the application to become healthy before showing the Swagger address. No local Java, Maven, PostgreSQL, Redis, or separate Ubuntu installation is required. The first build needs internet access.
+
+**Rerunning the script preserves configured credentials and database data.** If an existing database is found but its password is missing, restore its original `DB_PASSWORD` in `.env` before rerunning. Keep `.env` private; it is excluded from Git. For a terminal run without the closing pause, use `.\start-linkly.cmd --no-pause`.
+
+### Try the application
+
+Open [Swagger UI](http://localhost:8080/swagger-ui.html):
+
+1. Register or log in and copy the returned JWT.
+2. Click **Authorize** and enter the token.
+3. Call `POST /api/urls/shorten` with `{"originalUrl":"https://example.com"}`.
+4. Open the returned `shortUrl`, then call `GET /api/urls` to see your saved link and updated count.
+
+For AI features, set `GEMINI_API_KEY` in `.env` and rerun the script. Then use **suggest → optionally regenerate → confirm**. The suggestion becomes a saved, active link only after confirmation.
+
+### Manage the local stack
 
 ```powershell
-docker run -d --name linkly-local-redis -p 127.0.0.1:6379:6379 redis:7-alpine
+docker compose logs -f app  # View application logs
+docker compose down         # Stop; keep database data
+.\start-linkly.cmd          # Start again
 ```
 
-In the same PowerShell window used to start Java:
+Default host ports: **8080** for Linkly, **5433** for PostgreSQL, and **6380** for Redis. Keep these available. An existing standalone container named `linkly-redis` must also be stopped and renamed before Compose can use that name; see the guide's troubleshooting section. Avoid `docker compose down -v` unless you intend to delete the database.
 
-```powershell
-$env:DB_HOST = 'localhost'
-$env:DB_PORT = '5432'
-$env:DB_NAME = 'url_shortener'
-$env:DB_USERNAME = 'postgres'
-$env:DB_PASSWORD = '<your-database-password>'
-$env:REDIS_HOST = 'localhost'
-$env:REDIS_PORT = '6380' # Use 6379 for the standalone Redis example.
-$env:JWT_SECRET = '<your-random-secret-at-least-32-characters>'
-$env:VERIFICATION_SECRET = '<another-random-secret-at-least-32-characters>'
-$env:GEMINI_API_KEY = '<your-gemini-key>'
-.\mvnw.cmd spring-boot:run
-```
+For manual Docker setup on another platform, copy `.env.example` to `.env`, replace `DB_PASSWORD`, `JWT_SECRET`, and `VERIFICATION_SECRET` with strong random values (at least 32 bytes per signing secret), and run `docker compose up --build -d`. The Gemini key is optional.
 
-For an entirely non-Docker setup, use your installed PostgreSQL and a Redis service, for example Redis in an existing supported WSL Linux distribution. Set the corresponding host/ports. Docker Desktop's internal `docker-desktop` distribution is not a general-purpose Linux environment.
+## More information
 
-Spring Boot does **not** automatically load a project-root `.env` file when run directly. Export the variables above or configure the IDE's run environment. An existing ignored `src/main/resources/application.properties` takes precedence over YAML for matching keys; remove hardcoded overrides there or change them to environment placeholders. The `.sample` file shows optional overrides.
-
-Build and run a JAR instead:
-
-```powershell
-.\mvnw.cmd clean package
-java -jar target/url-shortener-0.0.1-SNAPSHOT.jar
-```
-
-## Correctness and failure behavior
-
-- **Every successful redirect counts.** Only destination metadata is cached. An atomic SQL increment runs for each GET, including cache hits, preventing lost updates during concurrent visits. This is a count of redirect requests, including bots and repeated visits, rather than unique people.
-- **Expiry applies on cache hits.** Expired links return **410 Gone** and do not increment. The SQL update also checks expiry, so a database expiry change takes effect even when Redis holds older metadata. Deleted links return **404**. There is currently no public expiry-editing endpoint.
-- **Redis is optional for redirects.** Cache errors fall back to PostgreSQL; clicks are still counted. One database write per visit is intentional. Redis caches destination reads for up to one hour under the new `urlDestinations` namespace; older `urls` entries can expire naturally.
-- **Creation/AI quotas:** per authenticated user, independent one-hour windows allow **30 basic shorten**, **10 suggest**, **5 regenerate**, and **10 confirm** requests. Redis Lua performs increment + TTL atomically and repairs old counters with no expiry. Attempted calls consume quota, including provider failures and rejected signed requests. Exceeding quota returns **429**. Unavailable rate limiting returns **503** before fetching a page or calling Gemini.
-- **Gemini failures are bounded.** Connection timeout is 5 seconds; each request has a configurable 15-second deadline. Missing keys, provider HTTP errors, malformed responses and invalid generated slugs return **503** for required AI operations. Basic shortening, registration, login, listing and saved-link redirects do not call Gemini. The optional tagging step falls back to empty tags / `Uncategorized` if it fails after a successful safety check.
-- **Conservative safety parsing:** only the complete response `SAFE` is accepted, ignoring case/outer whitespace. `NOT SAFE`, `SAFETY` and other ambiguous answers are rejected. AI checks are heuristic and cannot guarantee a destination is safe.
-- **Untrusted input/output:** submitted destinations must parse as HTTP(S) URLs with a host and no embedded credentials; whitespace and invalid ports are rejected. Slugs and AI metadata are validated/bounded before persistence.
-- **Consistent errors:** duplicate emails return **409**, invalid HMAC pairs / unsafe results **400**, malformed JSON **400**, invalid or deleted-user JWTs JSON **401**, unreadable AI-flow destination pages **422**, and unexpected failures a generic **500**.
-- **One row per successful creation.** Slug collisions update the same reserved mapping with an ID-based Base62 suffix. Unique-constraint conflicts roll back and retry in a fresh transaction, up to three attempts. Long slugs leave room for the suffix within 100 characters.
-
-The redirect counter proves the server prepared a redirect after a successful database transaction; it cannot prove the browser followed the destination. A database outage still prevents redirects because reliable counting and mapping validity require PostgreSQL.
-
-## Tests
-
-```powershell
-.\mvnw.cmd test
-```
-
-The default suite uses isolated H2 databases, an in-memory cache and dynamic-port WireMock page/Gemini servers. No real API key is required and no paid Gemini requests are made. Coverage includes authentication, ownership isolation, slug collisions, preview routes, cache-hit counting, concurrent clicks, expiry/deletion, cache failure fallback, malformed URLs, AI deadlines/output checks, dependency errors, AI-only content decisions, context preparation, pinned DNS, private-address blocking for AI fetching, response limits and basic shortening with neither destination access nor a Gemini key.
-
-Real Redis / PostgreSQL tests are opt-in. Use **disposable** containers: the PostgreSQL test creates/drops its test schema. These tests must never point at an existing project database. For example:
-
-```powershell
-docker run -d --name linkly-test-redis -p 127.0.0.1:16379:6379 redis:7-alpine
-docker run -d --name linkly-test-postgres -e POSTGRES_PASSWORD=isolated-test-only -e POSTGRES_DB=linkly_audit -p 127.0.0.1:15432:5432 postgres:16-alpine
-# Wait for PostgreSQL to report ready.
-docker exec linkly-test-postgres pg_isready -U postgres -d linkly_audit
-.\mvnw.cmd "-Dlinkly.test.redis.port=16379" "-Dlinkly.test.postgres.port=15432" test
-docker rm -f linkly-test-redis linkly-test-postgres
-```
-
-These checks use real HTTP requests and PostgreSQL atomic updates, Redis Lua quotas under concurrency, and serialization of cached expiry timestamps. The ordinary suite skips these opt-in tests when the properties are absent.
-
-To test both flows using controlled pages and mocked Gemini decisions:
-
-```powershell
-.\mvnw.cmd "-Dtest=ContentShorteningIntegrationTest,PageContentServiceTest,PageContentFetcherTest,PublicUrlPolicyTest" test
-```
-
-An optional real-HTTPS smoke check fetches only `https://example.com`:
-
-```powershell
-.\mvnw.cmd "-Dtest=PublicContentSmokeTest" "-Dlinkly.test.public-content=true" test
-```
-
-## Configuration
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `DB_HOST`, `DB_PORT` | Database address | localhost / 5432 |
-| `DB_NAME`, `DB_USERNAME` | Database / user | url_shortener / postgres |
-| `DB_PASSWORD` | Database password | Required |
-| `REDIS_HOST`, `REDIS_PORT` | Redis address | localhost / 6379 |
-| `JWT_SECRET` | JWT signing secret, at least 32 characters | Required |
-| `JWT_EXPIRY` | JWT lifetime in milliseconds | 86400000 |
-| `VERIFICATION_SECRET` | Independent HMAC signing secret | Required |
-| `GEMINI_API_KEY` | Optional; enables AI operations | Empty; AI routes return 503 |
-| `GEMINI_API_URL` | Gemini generateContent endpoint | gemini-2.5-flash-lite endpoint |
-| `GEMINI_TIMEOUT_SECONDS` | Per-provider-request deadline | 15 |
-| `CONTENT_CHECK_TIMEOUT_SECONDS` | Total page-fetch deadline (1-30 seconds) | 8 |
-| `APP_BASE_URL` | Public application origin used in generated links | http://localhost:8080 |
-
-Compose uses its documented host mappings while overriding the app's internal addresses. Redis connect/command timeouts default to one second in the tracked YAML.
-
-## Current limitations
-
-There is no frontend, pagination, link editing/deletion API, refresh-token/logout-revocation flow, or database migration tool. Confirmation is not idempotent: replaying a valid confirmation can create another suffixed link within the quota. HMAC tokens bind the URL and slug but do not expire or bind to a particular user. Database timestamps use server-local time; deploy instances with consistent clocks/timezones. Cache invalidation would need extending before adding destination editing. Rate limits are per user; registration/login currently have no IP-based abuse protection. Hibernate `ddl-auto=update` is intended for development; use reviewed migrations before production.
-
-## Code layout
-
-`controller` defines routes, `service` handles auth/AI/creation/redirect lookup, `repository` performs persistence and atomic increments, `entity` defines users and mappings, `dto` defines payloads/cache metadata, `validation` checks submitted URL syntax, `safety` safely fetches and prepares destination content for Gemini, `config` sets up security/cache/docs, and `util` contains JWT, HMAC and Base62 helpers.
+- [API reference](API_REFERENCE.md): request bodies, responses, and copyable examples.
+- [Interview guide](LINKLY_INTERVIEW_GUIDE.md): architecture, design decisions, follow-up questions, testing, troubleshooting, and running Java without Docker.

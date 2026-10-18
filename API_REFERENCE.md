@@ -2,6 +2,8 @@
 
 Examples match the current application code, including the URL-listing endpoint added in commit `cc4335f`.
 
+For local startup, follow the [README](README.md). On Windows, `start-linkly.cmd` generates the required credentials, writes `.env`, and starts the Docker stack. A Gemini key is optional for basic shortening.
+
 ## Base URL and request setup
 
 ```text

@@ -34,6 +34,8 @@ build/
 
 # Environment variables — never commit
 .env
+.env.setup-*
+.linkly-setup.lock
 
 # Application properties with secrets
 src/main/resources/application.properties
