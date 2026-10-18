@@ -16,6 +16,10 @@ spring:
       connect-timeout: 1s
       timeout: 1s
 app:
+  safety:
+    timeout-seconds: ${CONTENT_CHECK_TIMEOUT_SECONDS:8}
+    max-content-bytes: 1048576
+    max-redirects: 3
   base-url: ${APP_BASE_URL:http://localhost:8080}
   jwt:
     secret: ${JWT_SECRET}

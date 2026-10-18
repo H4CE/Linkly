@@ -28,7 +28,7 @@ class RedisIntegrationTest {
         userId = ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE);
     }
     @AfterEach void cleanup() {
-        for (String operation : new String[]{"suggest", "regenerate", "confirm"})
+        for (String operation : new String[]{"suggest", "regenerate", "confirm", "shorten"})
             redis.delete("ratelimit:" + operation + ":" + userId);
         factory.destroy();
     }
@@ -40,6 +40,8 @@ class RedisIntegrationTest {
         assertFalse(limits.isRegenerateAllowed(userId));
         for (int i = 0; i < 10; i++) assertTrue(limits.isConfirmAllowed(userId));
         assertFalse(limits.isConfirmAllowed(userId));
+        for (int i = 0; i < 30; i++) assertTrue(limits.isShortenAllowed(userId));
+        assertFalse(limits.isShortenAllowed(userId));
         Long ttl = redis.getExpire("ratelimit:confirm:" + userId);
         assertNotNull(ttl);
         assertTrue(ttl > 0 && ttl <= 3600);

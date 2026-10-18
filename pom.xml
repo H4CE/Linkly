@@ -30,6 +30,17 @@
 		<java.version>21</java.version>
 	</properties>
 	<dependencies>
+		<!-- Pin destination DNS while preserving HTTPS certificate checks when inspecting pages. -->
+		<dependency>
+			<groupId>org.apache.httpcomponents.client5</groupId>
+			<artifactId>httpclient5</artifactId>
+		</dependency>
+		<!-- Parse downloaded HTML locally without running JavaScript or fetching subresources. -->
+		<dependency>
+			<groupId>org.jsoup</groupId>
+			<artifactId>jsoup</artifactId>
+			<version>1.23.2</version>
+		</dependency>
 		<!-- JWT: creating and verifying JSON Web Tokens -->
 		<dependency>
 			<groupId>io.jsonwebtoken</groupId>

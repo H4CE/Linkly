@@ -28,6 +28,7 @@ public class RateLimitService {
     public boolean isSuggestAllowed(Long userId) { return isAllowed("suggest", userId, 10); }
     public boolean isRegenerateAllowed(Long userId) { return isAllowed("regenerate", userId, 5); }
     public boolean isConfirmAllowed(Long userId) { return isAllowed("confirm", userId, 10); }
+    public boolean isShortenAllowed(Long userId) { return isAllowed("shorten", userId, 30); }
 
     private boolean isAllowed(String operation, Long userId, int maximum) {
         try {

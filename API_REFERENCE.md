@@ -22,7 +22,7 @@ Authorization: Bearer <JWT_FROM_LOGIN_OR_REGISTER>
 
 In Postman's **Authorization -> Bearer Token** field, paste only the JWT. Postman adds `Bearer` automatically. For GET requests, choose **Body -> none**; do not send `{}`.
 
-There are two different tokens in the creation flow:
+The AI creation flow uses two different tokens. Basic shortening needs only the JWT:
 
 | Token | Where it comes from | Where it goes |
 |---|---|---|
@@ -31,7 +31,7 @@ There are two different tokens in the creation flow:
 
 Replace angle-bracket placeholders with actual values. Example AI slugs, metadata, and timestamps below are illustrative. Do not copy a placeholder verification token and expect it to validate.
 
-The backend must be running with PostgreSQL available. Suggestion, regeneration and confirmation require Redis rate limiting and Gemini. Redirects use Redis caching with database fallback if Redis is unavailable. For Redis in your existing Docker Compose setup while Java runs on Windows, configure `localhost:6380`.
+The backend must be running with PostgreSQL available. Basic shortening uses Redis rate limiting and local page-content checks; it does not call Gemini. Suggestion, regeneration and confirmation require Redis rate limiting and Gemini. Redirects use Redis caching with database fallback if Redis is unavailable. For Redis in your existing Docker Compose setup while Java runs on Windows, configure `localhost:6380`.
 
 ## Endpoint overview
 
@@ -40,6 +40,7 @@ The backend must be running with PostgreSQL available. Suggestion, regeneration 
 | POST | `/api/auth/register` | No | `email`, `password` | 201 |
 | POST | `/api/auth/login` | No | `email`, `password` | 200 |
 | GET | `/api/urls` | Yes | None | 200 |
+| POST | `/api/urls/shorten` | Yes | `originalUrl` | 201 |
 | POST | `/api/urls/suggest` | Yes | `originalUrl` | 200 |
 | POST | `/api/urls/regenerate` | Yes | `originalUrl`, `previousSlug`, `verificationToken` | 200 |
 | POST | `/api/urls/confirm` | Yes | `originalUrl`, `slug`, `verificationToken` | 201 |
@@ -140,6 +141,59 @@ Authorization: Bearer <JWT>
 - A user with no saved mappings receives `200 OK` and `[]`.
 - No `userId` is accepted as an ownership selector. Adding another user's ID to a query does not change the authenticated owner.
 - Listing does not generate AI output or increment clicks.
+
+## Basic shortening without AI
+
+```http
+POST /api/urls/shorten
+Authorization: Bearer <JWT_FROM_LOGIN_OR_REGISTER>
+Content-Type: application/json
+```
+
+Required body:
+
+```json
+{
+  "originalUrl": "https://example.com"
+}
+```
+
+This fetches and checks the page locally, then creates a random 10-character Base62 code. It needs no Gemini key, suggested slug or verification token. The normal database collision handling remains authoritative, so a collision can append an ID suffix. Example response (generated code and timestamp vary):
+
+```json
+{
+  "shortUrl": "http://localhost:8080/api/urls/A7k2N9pQ4x",
+  "originalUrl": "https://example.com",
+  "createdAt": "2026-10-18T20:00:00",
+  "expiresAt": null,
+  "clickCount": 0,
+  "tags": [],
+  "category": "Uncategorized"
+}
+```
+
+The mapping belongs to the logged-in user and appears in `GET /api/urls`. Open its returned `shortUrl` to use the public redirect. The independent basic-shortening quota is **30 attempts per user per hour**. Exceeding it returns 429 with an empty body. Redis rate limiting is still required; an unavailable limiter returns 503 before the destination is fetched.
+
+### What the content checks inspect
+
+Both basic shortening and AI confirmation fetch the actual HTML/plain-text response. Local rules inspect password-form transport/method/destination, wallet recovery/private-key fields, meta-refresh redirects, a specific obfuscated-script pattern and obvious binary-file signatures. AI confirmation additionally sends the URL and up to 12,000 characters of extracted page text to Gemini. Basic shortening makes **no AI calls**, including metadata generation.
+
+Fetching allows public HTTP(S) destinations on their standard ports only, validates and pins DNS answers, checks each redirect, preserves normal TLS validation and forwards no caller credentials/cookies. Limits: 8 seconds total fetching, 2-second connection/read timeouts, 3 HTTP redirects, 1 MiB decompressed body, 4 simultaneous fetches. `CONTENT_CHECK_TIMEOUT_SECONDS` changes the total timeout within 1-30 seconds.
+
+- **400:** blocked private/local destination, unsupported port/scheme, or a flagged content rule.
+- **422:** a page cannot be inspected: unsupported file type, oversized/empty/script-only response, redirect loop/limit, unresolved hostname or unsuccessful HTTP response (including bot blocking).
+- **503:** fetching timed out/failed (including TLS failure), scanning is busy, or rate limiting is unavailable.
+
+No link is saved when checks reject or cannot finish. These are limited heuristics, not a guarantee of safety or an antivirus scan. JavaScript is not run; linked scripts, images, frames and other assets are not downloaded. Legitimate cross-host login flows or bot-protected pages may be rejected. Content is checked at creation, so later changes are not covered. Previously saved links are not retroactively scanned.
+
+PowerShell example using the `$baseUrl` and `$headers` from the login workflow below:
+
+```powershell
+$basicBody = @{ originalUrl = 'https://example.com' } | ConvertTo-Json
+$basic = Invoke-RestMethod -Method Post -Uri "$baseUrl/api/urls/shorten" `
+    -Headers $headers -ContentType 'application/json' -Body $basicBody
+$basic.shortUrl
+```
 
 ## 4. Request an AI slug suggestion
 
@@ -257,9 +311,9 @@ Do not send `previousSlug` here: confirmation uses the field name `slug`. Do not
 }
 ```
 
-Confirmation verifies the HMAC token, asks Gemini for a safety assessment and metadata, and saves the mapping with its owner. Tags can fall back to `[]` and category to `Uncategorized`. The current request does not accept an expiry setting, so newly created mappings normally have `expiresAt: null`.
+Confirmation verifies the HMAC token, fetches the page, runs local content rules, asks Gemini to assess the URL plus fetched text, generates metadata, and saves the mapping with its owner. Tags can fall back to `[]` and category to `Uncategorized`. The current request does not accept an expiry setting, so newly created mappings normally have `expiresAt: null`.
 
-Invalid verification tokens and safety results interpreted as unsafe return 400. Gemini safety-check failure blocks creation with 503. Only an exact SAFE answer is accepted, ignoring case and outer whitespace; ambiguous responses such as NOT SAFE are rejected. Optional tagging failures fall back to empty tags and Uncategorized. If a slug is taken, creation appends a Base62 ID suffix, shortening the prefix if needed to keep the code within 100 characters. Each successful confirmation creates one mapping; conflicting writes are rolled back and retried up to three attempts. Repeated confirmation is not idempotent: it creates another link with a different code. Confirmation allows 10 attempted requests per user per hour; the independent suggest/regenerate quotas are 10 and 5. Counters include failed/rejected attempts after request-body validation. Quota exhaustion returns 429; unavailable Redis rate limiting returns 503 before Gemini is called.
+Invalid verification tokens, blocked destinations, local content violations and Gemini results interpreted as unsafe return 400. Uninspectable pages return 422, and fetch/network/deadline failures return 503. Gemini safety-check failure blocks creation with 503. Only an exact SAFE answer is accepted, ignoring case and outer whitespace; ambiguous responses such as NOT SAFE are rejected. Optional tagging failures fall back to empty tags and Uncategorized. If a slug is taken, creation appends a Base62 ID suffix, shortening the prefix if needed to keep the code within 100 characters. Each successful confirmation creates one mapping; conflicting writes are rolled back and retried up to three attempts. Repeated confirmation is not idempotent: it creates another link with a different code. Confirmation allows 10 attempted requests per user per hour; the independent suggest/regenerate quotas are 10 and 5. Counters include failed/rejected attempts after request-body validation. Quota exhaustion returns 429; unavailable Redis rate limiting returns 503 before Gemini is called.
 
 ## 7. Follow a saved short link
 
@@ -402,13 +456,14 @@ Example for an invalid URL:
 
 | Status | Typical current cause | What to check |
 |---|---|---|
-| 400 | Invalid HMAC pair or URL interpreted as unsafe | Use the exact URL, slug, and matching token from one suggestion response |
+| 400 | Invalid HMAC pair, blocked destination, or flagged content/safety result | Use the exact URL, slug, and matching token from one suggestion response |
 | 401 | Bad login credentials or missing/invalid JWT | Login credentials, Authorization header, fresh JWT |
 | 404 | Unknown saved short code | Use a link that was successfully confirmed |
 | 409 | Email already registered | Log in instead of registering again |
 | 410 | Short link expired | Request a new link |
-| 429 | Suggestion/regeneration/confirmation quota exceeded | Wait for that user's one-hour window to expire |
-| 503 | Required AI operation failed or rate limiter unavailable | Gemini credentials/quota and Redis connectivity |
+| 422 | Destination content could not be inspected | Use an accessible public HTML/plain-text page within the documented limits |
+| 429 | Basic shortening or suggestion/regeneration/confirmation quota exceeded | Wait for that user's one-hour window to expire |
+| 503 | Required AI operation, content fetch, or rate limiter unavailable | Destination connectivity/TLS, Gemini credentials/quota, Redis and scan capacity |
 | 500 | Database/unexpected failure or exhausted slug-allocation retry | Application logs and dependency connectivity |
 
 General runtime failures usually return:
@@ -423,6 +478,6 @@ General runtime failures usually return:
 
 If an AI endpoint returns 503 because the rate limiter is unavailable while Java runs on Windows and Redis runs through this project's Compose file, start Redis with `docker compose up -d redis`, verify `docker compose exec redis redis-cli ping` returns `PONG`, set `REDIS_HOST=localhost` and `REDIS_PORT=6380` for the Java process, and restart the application. A locally installed Redis service normally uses port 6379 instead.
 
-Gemini credentials belong in backend configuration, not in your API request bodies. Provider requests have a five-second connection timeout and a configurable 15-second request deadline. Missing keys and invalid provider output return 503 for required AI operations. Tags/category are bounded to fit database columns. Registration, login, listing, and existing-link redirects make no Gemini calls; suggestion, regeneration, and confirmation depend on it. The tracked configuration allows startup without a Gemini key; database and signing settings remain required. See README.md for Docker and local startup.
+Gemini credentials belong in backend configuration, not in your API request bodies. Provider requests have a five-second connection timeout and a configurable 15-second request deadline. Missing keys and invalid provider output return 503 for required AI operations. Tags/category are bounded to fit database columns. Basic shortening, registration, login, listing, and existing-link redirects make no Gemini calls; suggestion, regeneration, and confirmation depend on it. The tracked configuration allows startup without a Gemini key; database and signing settings remain required. See README.md for Docker and local startup.
 
 Destinations must be valid HTTP(S) URLs with a host (maximum 2048 characters), with no embedded username/password or invalid port. Arbitrary custom slugs are not exposed through a direct shortening endpoint.

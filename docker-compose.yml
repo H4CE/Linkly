@@ -48,6 +48,7 @@ services:
       JWT_EXPIRY: 86400000
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_API_URL: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent
+      CONTENT_CHECK_TIMEOUT_SECONDS: ${CONTENT_CHECK_TIMEOUT_SECONDS:-8}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
       VERIFICATION_SECRET: ${VERIFICATION_SECRET:?Set VERIFICATION_SECRET in .env}
     depends_on:

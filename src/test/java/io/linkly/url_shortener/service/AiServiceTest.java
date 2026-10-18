@@ -120,7 +120,7 @@ class AiServiceTest {
         stubGeminiResponse("SAFE");
 
         boolean result = aiService.checkIfSafe(
-                "https://www.baeldung.com/spring-boot");
+                "https://www.baeldung.com/spring-boot", "Fetched page text for safety assessment.");
 
         assertTrue(result);
     }
@@ -131,7 +131,7 @@ class AiServiceTest {
         stubGeminiResponse("UNSAFE");
 
         boolean result = aiService.checkIfSafe(
-                "http://malware-test.com/virus.exe");
+                "http://malware-test.com/virus.exe", "Fetched page text for safety assessment.");
 
         assertFalse(result);
     }
@@ -142,7 +142,7 @@ class AiServiceTest {
         stubGeminiResponse("safe");
 
         boolean result = aiService.checkIfSafe(
-                "https://www.baeldung.com/spring-boot");
+                "https://www.baeldung.com/spring-boot", "Fetched page text for safety assessment.");
 
         assertTrue(result);
     }
@@ -153,7 +153,7 @@ class AiServiceTest {
         stubGeminiResponse("UNSAFE - this URL contains malware");
 
         boolean result = aiService.checkIfSafe(
-                "http://malware-test.com/virus.exe");
+                "http://malware-test.com/virus.exe", "Fetched page text for safety assessment.");
 
         assertFalse(result);
     }
@@ -207,7 +207,7 @@ class AiServiceTest {
     @ValueSource(strings = {"NOT SAFE", "SAFETY", "SAFE but suspicious", "UNKNOWN"})
     void ambiguousSafetyResponsesAreNeverAccepted(String text) {
         stubGeminiResponse(text);
-        assertFalse(aiService.checkIfSafe("https://example.com"));
+        assertFalse(aiService.checkIfSafe("https://example.com", "Fetched page text for safety assessment."));
     }
 
     @ParameterizedTest
@@ -279,5 +279,12 @@ class AiServiceTest {
     @Test void optionalTaggingFallsBackOnProviderFailure() {
         wireMockServer.stubFor(post(urlPathEqualTo("/mock-gemini")).willReturn(aResponse().withStatus(503)));
         assertEquals(new AiService.AiTagResult(List.of(), "Uncategorized"), aiService.generateTags("https://example.com"));
+    }
+    @Test void safetyAssessmentReceivesFetchedContentInsteadOfOnlyTheUrl() {
+        stubGeminiResponse("SAFE");
+        assertTrue(aiService.checkIfSafe("https://example.com", "This is the actual fetched article body."));
+        wireMockServer.verify(postRequestedFor(urlEqualTo("/mock-gemini"))
+                .withRequestBody(matchingJsonPath("$.contents[0].parts[0].text",
+                        containing("This is the actual fetched article body."))));
     }
 }

@@ -7,6 +7,9 @@ import io.linkly.url_shortener.entity.User;
 import io.linkly.url_shortener.repository.UrlMappingRepository;
 import io.linkly.url_shortener.repository.UserRepository;
 import io.linkly.url_shortener.service.AiService;
+import io.linkly.url_shortener.safety.ContentSafetyService;
+import io.linkly.url_shortener.util.RandomShortCodeGenerator;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import io.linkly.url_shortener.service.RateLimitService;
 import io.linkly.url_shortener.util.Base62Encoder;
 import io.linkly.url_shortener.util.SlugVerificationUtil;
@@ -79,6 +82,12 @@ class UrlMappingControllerTest {
     @MockitoBean
     private RateLimitService rateLimitService;
 
+    @MockitoBean
+    private ContentSafetyService contentSafetyService;
+
+    @MockitoSpyBean
+    private RandomShortCodeGenerator randomShortCodeGenerator;
+
     private String token;
     private static final String TEST_URL = "https://www.baeldung.com/spring-boot";
     private static final String TEST_SLUG = "spring-boot-guide";
@@ -86,6 +95,8 @@ class UrlMappingControllerTest {
     @BeforeEach
     void setUp() throws Exception {
         cacheManager.getCache("urlDestinations").clear();
+        when(contentSafetyService.inspect(anyString())).thenReturn("Fetched article about Spring Boot.");
+        when(rateLimitService.isShortenAllowed(anyLong())).thenReturn(true);
         when(rateLimitService.isSuggestAllowed(anyLong())).thenReturn(true);
         when(rateLimitService.isConfirmAllowed(anyLong())).thenReturn(true);
         when(rateLimitService.isRegenerateAllowed(anyLong())).thenReturn(true);
@@ -112,7 +123,7 @@ class UrlMappingControllerTest {
                 .thenReturn(TEST_SLUG);
         when(aiService.regenerateSlug(anyString(), anyString()))
                 .thenReturn("baeldung-spring-tutorial");
-        when(aiService.checkIfSafe(anyString()))
+        when(aiService.checkIfSafe(anyString(), anyString()))
                 .thenReturn(true);
         when(aiService.generateTags(anyString()))
                 .thenReturn(new AiService.AiTagResult(
@@ -304,7 +315,7 @@ class UrlMappingControllerTest {
                 .findByShortCode(occupiedCode).orElseThrow().getOriginalUrl());
         assertTrue(urlMappingRepository.findAll().stream()
                 .noneMatch(mapping -> mapping.getShortCode().startsWith("pending_")));
-        verify(aiService, times(1)).checkIfSafe(TEST_URL);
+        verify(aiService, times(1)).checkIfSafe(org.mockito.ArgumentMatchers.eq(TEST_URL), org.mockito.ArgumentMatchers.eq("Fetched article about Spring Boot."));
         verify(aiService, times(1)).generateTags(TEST_URL);
     }
 
@@ -362,7 +373,7 @@ class UrlMappingControllerTest {
     @Test
     @DisplayName("confirm with unsafe URL returns 400")
     void confirm_unsafeUrl_returns400() throws Exception {
-        when(aiService.checkIfSafe(anyString())).thenReturn(false);
+        when(aiService.checkIfSafe(anyString(), anyString())).thenReturn(false);
 
         String verificationToken = slugVerificationUtil
                 .generateToken(TEST_URL, TEST_SLUG);
@@ -498,7 +509,7 @@ class UrlMappingControllerTest {
                         .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL, "slug", TEST_SLUG,
                                 "verificationToken", slugVerificationUtil.generateToken(TEST_URL, TEST_SLUG)))))
                 .andExpect(status().isTooManyRequests());
-        verify(aiService, org.mockito.Mockito.never()).checkIfSafe(anyString());
+        verify(aiService, org.mockito.Mockito.never()).checkIfSafe(anyString(), anyString());
         assertEquals(0, urlMappingRepository.count());
     }
 
@@ -519,7 +530,7 @@ class UrlMappingControllerTest {
     }
 
     @Test void aiOutageReturns503WithoutSavingMapping() throws Exception {
-        when(aiService.checkIfSafe(anyString())).thenThrow(new io.linkly.url_shortener.exception.ApiException(
+        when(aiService.checkIfSafe(anyString(), anyString())).thenThrow(new io.linkly.url_shortener.exception.ApiException(
                 org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, "AI service unavailable"));
         mockMvc.perform(post("/api/urls/confirm").header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -527,5 +538,90 @@ class UrlMappingControllerTest {
                                 "verificationToken", slugVerificationUtil.generateToken(TEST_URL, TEST_SLUG)))))
                 .andExpect(status().isServiceUnavailable());
         assertEquals(0, urlMappingRepository.count());
+    }
+    @Test void basicShorteningWorksWhenGeminiIsUnavailable() throws Exception {
+        // No stubbing can rescue an accidental AI call: verify none occur in this route.
+        var result = mockMvc.perform(post("/api/urls/shorten").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL))))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.originalUrl").value(TEST_URL))
+                .andExpect(jsonPath("$.clickCount").value(0)).andExpect(jsonPath("$.tags").isEmpty())
+                .andExpect(jsonPath("$.category").value("Uncategorized")).andReturn();
+        String shortUrl = objectMapper.readTree(result.getResponse().getContentAsString()).path("shortUrl").asText();
+        assertTrue(shortUrl.matches("http://localhost:8080/api/urls/[A-Za-z0-9]{10}"));
+        assertEquals(1, urlMappingRepository.count());
+        assertEquals("testuser@gmail.com", userRepository.findById(urlMappingRepository.findAll().getFirst()
+                .getUser().getId()).orElseThrow().getEmail());
+        mockMvc.perform(get(URI.create(shortUrl).getPath())).andExpect(status().isFound())
+                .andExpect(header().string("Location", TEST_URL));
+        mockMvc.perform(get("/api/urls").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk()).andExpect(jsonPath("$[0].shortUrl").value(shortUrl))
+                .andExpect(jsonPath("$[0].clickCount").value(1));
+        verify(contentSafetyService).inspect(TEST_URL);
+        org.mockito.Mockito.verifyNoInteractions(aiService);
+    }
+
+    @Test void basicShorteningRequiresLogin() throws Exception {
+        mockMvc.perform(post("/api/urls/shorten").contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL))))
+                .andExpect(status().isUnauthorized());
+        org.mockito.Mockito.verifyNoInteractions(contentSafetyService, aiService);
+    }
+
+    @Test void basicShorteningRejectsInvalidUrlsBeforeFetching() throws Exception {
+        mockMvc.perform(post("/api/urls/shorten").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"originalUrl\":\"https:///missing-host\"}"))
+                .andExpect(status().isBadRequest());
+        org.mockito.Mockito.verifyNoInteractions(contentSafetyService, aiService);
+    }
+
+    @Test void basicQuotaIsCheckedBeforeFetching() throws Exception {
+        when(rateLimitService.isShortenAllowed(anyLong())).thenReturn(false);
+        mockMvc.perform(post("/api/urls/shorten").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL))))
+                .andExpect(status().isTooManyRequests());
+        assertEquals(0, urlMappingRepository.count());
+        org.mockito.Mockito.verifyNoInteractions(contentSafetyService, aiService);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {400, 422, 503})
+    void basicShorteningDoesNotSaveRejectedOrUnscannableContent(int statusCode) throws Exception {
+        when(contentSafetyService.inspect(anyString())).thenThrow(new io.linkly.url_shortener.exception.ApiException(
+                org.springframework.http.HttpStatus.valueOf(statusCode), "Content check did not pass"));
+        mockMvc.perform(post("/api/urls/shorten").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL))))
+                .andExpect(status().is(statusCode));
+        assertEquals(0, urlMappingRepository.count());
+        org.mockito.Mockito.verifyNoInteractions(aiService);
+    }
+
+    @Test void basicCodeCollisionPreservesExistingOwnerAndCreatesOneMapping() throws Exception {
+        var owner = userRepository.findByEmail("testuser@gmail.com").orElseThrow();
+        saveMapping(owner, "FixedCode1", "https://example.com/existing");
+        org.mockito.Mockito.doReturn("FixedCode1").when(randomShortCodeGenerator).generate();
+        mockMvc.perform(post("/api/urls/shorten").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL))))
+                .andExpect(status().isCreated());
+        assertEquals(2, urlMappingRepository.count());
+        assertEquals("https://example.com/existing", urlMappingRepository.findByShortCode("FixedCode1")
+                .orElseThrow().getOriginalUrl());
+        assertEquals(1, urlMappingRepository.findAll().stream().filter(m -> m.getOriginalUrl().equals(TEST_URL)).count());
+        org.mockito.Mockito.verifyNoInteractions(aiService);
+    }
+
+    @Test void localContentRejectionAlsoBlocksAiConfirmationBeforeGemini() throws Exception {
+        when(contentSafetyService.inspect(anyString())).thenThrow(new io.linkly.url_shortener.exception.ApiException(
+                org.springframework.http.HttpStatus.BAD_REQUEST, "Page collects passwords insecurely"));
+        mockMvc.perform(post("/api/urls/confirm").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL, "slug", TEST_SLUG,
+                                "verificationToken", slugVerificationUtil.generateToken(TEST_URL, TEST_SLUG)))))
+                .andExpect(status().isBadRequest());
+        assertEquals(0, urlMappingRepository.count());
+        org.mockito.Mockito.verifyNoInteractions(aiService);
     }
 }

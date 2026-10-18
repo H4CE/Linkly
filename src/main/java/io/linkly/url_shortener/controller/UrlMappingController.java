@@ -1,6 +1,7 @@
 package io.linkly.url_shortener.controller;
 
 import io.linkly.url_shortener.dto.request.ConfirmShortenRequest;
+import io.linkly.url_shortener.dto.request.BasicShortenRequest;
 import io.linkly.url_shortener.dto.request.RegenerateSlugRequest;
 import io.linkly.url_shortener.dto.request.SuggestRequest;
 import io.linkly.url_shortener.dto.response.ShortenResponse;
@@ -43,6 +44,18 @@ public class UrlMappingController {
         return userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"))
                 .getId();
+    }
+
+    @Operation(summary = "Shorten a URL without AI",
+            description = "Fetches and checks page content locally, then creates a random short code. " +
+                    "Requires no Gemini key, slug suggestion, or verification token. " +
+                    "Passing these limited checks is not a guarantee of safety.")
+    @PostMapping("/shorten")
+    public ResponseEntity<ShortenResponse> shortenBasic(@Valid @RequestBody BasicShortenRequest request) {
+        if (!rateLimitService.isShortenAllowed(getCurrentUserId())) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+        }
+        return ResponseEntity.status(HttpStatus.CREATED).body(urlMappingService.shortenBasic(request));
     }
 
     @Operation(
@@ -96,7 +109,7 @@ public class UrlMappingController {
     @Operation(
             summary = "Confirm and save a short URL",
             description = "Verifies the slug was AI generated via HMAC token, " +
-                    "runs spam detection, generates tags and category, " +
+                    "checks fetched page content locally and with Gemini, generates tags and category, " +
                     "then saves the URL mapping to the database."
     )
     @PostMapping("/confirm")

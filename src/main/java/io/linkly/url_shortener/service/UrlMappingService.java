@@ -1,6 +1,7 @@
 package io.linkly.url_shortener.service;
 
 import io.linkly.url_shortener.dto.request.ConfirmShortenRequest;
+import io.linkly.url_shortener.dto.request.BasicShortenRequest;
 import io.linkly.url_shortener.dto.request.RegenerateSlugRequest;
 import io.linkly.url_shortener.dto.request.SuggestRequest;
 import io.linkly.url_shortener.dto.response.ShortenResponse;
@@ -12,6 +13,8 @@ import io.linkly.url_shortener.exception.ApiException;
 import io.linkly.url_shortener.repository.UrlMappingRepository;
 import io.linkly.url_shortener.repository.UserRepository;
 import io.linkly.url_shortener.util.SlugVerificationUtil;
+import io.linkly.url_shortener.util.RandomShortCodeGenerator;
+import io.linkly.url_shortener.safety.ContentSafetyService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -33,9 +36,20 @@ public class UrlMappingService {
     private final UrlLookupService urlLookupService;
     private final AiService aiService;
     private final SlugVerificationUtil slugVerificationUtil;
+    private final ContentSafetyService contentSafetyService;
+    private final RandomShortCodeGenerator randomShortCodeGenerator;
 
     @Value("${app.base-url}")
     private String baseUrl;
+
+    public ShortenResponse shortenBasic(BasicShortenRequest request) {
+        // This route deliberately makes no AI calls, including optional tagging.
+        // A failed or incomplete content fetch blocks creation rather than silently skipping checks.
+        contentSafetyService.inspect(request.getOriginalUrl());
+        UrlMapping mapping = urlMappingCreationService.createMapping(request.getOriginalUrl(),
+                randomShortCodeGenerator.generate(), getCurrentUser(), "", "Uncategorized");
+        return buildShortenResponse(mapping);
+    }
 
     @Transactional(readOnly = true)
     public List<ShortenResponse> getCurrentUserMappings() {
@@ -108,8 +122,9 @@ public class UrlMappingService {
                     "Invalid verification token — slug was not AI generated");
         }
 
-        // Step 2 — spam check
-        boolean isSafe = aiService.checkIfSafe(request.getOriginalUrl());
+        // Apply the same local rules as basic shortening, then give Gemini actual fetched page text.
+        String pageText = contentSafetyService.inspect(request.getOriginalUrl());
+        boolean isSafe = aiService.checkIfSafe(request.getOriginalUrl(), pageText);
         if (!isSafe) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "This URL has been flagged as unsafe");
         }
