@@ -47,9 +47,9 @@ public class UrlMappingController {
     }
 
     @Operation(summary = "Shorten a URL without AI",
-            description = "Fetches and checks page content locally, then creates a random short code. " +
+            description = "Creates a random short code without fetching the destination or assessing spam/safety. " +
                     "Requires no Gemini key, slug suggestion, or verification token. " +
-                    "Passing these limited checks is not a guarantee of safety.")
+                    "Only URL syntax is validated; the destination is unchecked.")
     @PostMapping("/shorten")
     public ResponseEntity<ShortenResponse> shortenBasic(@Valid @RequestBody BasicShortenRequest request) {
         if (!rateLimitService.isShortenAllowed(getCurrentUserId())) {
@@ -109,7 +109,7 @@ public class UrlMappingController {
     @Operation(
             summary = "Confirm and save a short URL",
             description = "Verifies the slug was AI generated via HMAC token, " +
-                    "checks fetched page content locally and with Gemini, generates tags and category, " +
+                    "asks Gemini to assess downloaded page content, generates tags and category, " +
                     "then saves the URL mapping to the database."
     )
     @PostMapping("/confirm")

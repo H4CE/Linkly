@@ -8,7 +8,7 @@ Linkly is a Spring Boot 3.5 / Java 21 REST API with PostgreSQL persistence, JWT 
 |---|---|---|---|
 | POST | `/api/auth/register` | Public | Register and receive a JWT |
 | POST | `/api/auth/login` | Public | Log in and receive a JWT |
-| POST | `/api/urls/shorten` | Bearer JWT | Check page content locally and save a random code without AI |
+| POST | `/api/urls/shorten` | Bearer JWT | Save a random code without AI or destination-content checks |
 | POST | `/api/urls/suggest` | Bearer JWT | Suggest a slug without saving |
 | POST | `/api/urls/regenerate` | Bearer JWT | Replace a signed suggestion |
 | POST | `/api/urls/confirm` | Bearer JWT | Verify, check safety, tag and save |
@@ -21,12 +21,12 @@ See [API_REFERENCE.md](API_REFERENCE.md) for request bodies, responses and a cop
 
 AI shortening flow: **suggest → optionally regenerate → confirm**. Use the exact original URL, slug and verification token from the same response. A preview uses the real redirect path but becomes active only after confirmation. A collision may change the final code, so use the confirmed `shortUrl`.
 
-## Basic shortening and content checks
+## Basic shortening and AI content assessment
 
 For the interview demo, there are two creation flows:
 
-- **Basic:** `POST /api/urls/shorten` accepts only `originalUrl`, fetches/checks the page locally, and saves a random 10-character Base62 code (a collision can append an ID suffix). No Gemini key or verification token is needed. It returns the same saved-link response as confirmation, with empty tags and category `Uncategorized`.
-- **AI:** suggest/regenerate still generate readable slugs. Confirmation first performs the same local content checks, then sends the URL and up to 12,000 characters of fetched page text to Gemini for an additional assessment. AI confirmation still requires a working Gemini key.
+- **Basic:** `POST /api/urls/shorten` accepts only `originalUrl`, validates HTTP(S) URL syntax, and saves a random 10-character Base62 code (a collision can append an ID suffix). It does not fetch the URL, assess its contents, call Gemini, or classify it as spam/safe. No Gemini key or verification token is needed. Tags are empty and category is `Uncategorized`.
+- **AI:** suggest/regenerate generate readable slugs. Confirmation downloads the destination, prepares up to 12,000 characters of page context, and asks Gemini for the safety/spam decision. Gemini alone makes that content assessment; handwritten spam/content rules are not applied. A working Gemini key is required for this flow.
 
 Example basic request (with a login/register JWT in the Authorization header):
 
@@ -38,15 +38,17 @@ Content-Type: application/json
 {"originalUrl":"https://example.com"}
 ```
 
-Use the returned `shortUrl` to redirect, and `GET /api/urls` to see the saved mapping and click count. Creating a basic link makes **zero Gemini calls**, including tagging.
+Use the returned `shortUrl` to redirect, and `GET /api/urls` to see the saved mapping and click count. Basic creation does not require the destination to be reachable: downloads, private links or unavailable websites can be shortened if the URL syntax is valid. This provides **no content or spam protection**. PostgreSQL and Redis rate limiting are still required.
 
-The content checker downloads HTML/plain text and inspects the actual document. Its specific local rules reject password forms using HTTP, GET submission, another host, or submission overrides; wallet recovery/private-key fields; meta-refresh redirects; a narrow `eval/Function(atob/unescape(...))` script pattern; and obvious executable/archive/PDF signatures disguised as text. Parsing never executes JavaScript or downloads scripts, images, frames or linked files. These rules can reject legitimate pages and miss malicious ones; passing them is **not a guarantee of safety**, and this is not an antivirus scanner.
+### How AI receives page content
 
-Fetching is restricted to public HTTP on port 80 or HTTPS on port 443, with normal TLS certificate validation. Every redirect is checked, DNS answers are validated and pinned to the connection, and requests to localhost/private/special-use addresses are rejected. The scanner forwards no user Authorization header or cookies. A scan has an eight-second total fetch deadline, two-second connection/read timeouts, at most three HTTP redirects and a 1 MiB decompressed response limit. At most four fetches run concurrently.
+For AI confirmation, Java downloads bounded HTML/plain text. Jsoup extracts visible text and HTML form/redirect/script excerpts so Gemini can see information which plain text alone would omit. Parsing never executes scripts or downloads images, frames, linked scripts or other assets. Java prepares the evidence without using form destinations, field names, redirects, script patterns or file signatures to make a spam verdict.
 
-A rejected URL or flagged document returns **400**. Unsupported downloads, oversized/empty/script-only pages, unreadable HTTP responses (including sites blocking bots), and redirect loops return **422**. Network/TLS failures, timeouts and busy scanning return **503**. None of these failures saves a link or silently skips the check. Internet access to the submitted public page is needed even in basic mode.
+The AI downloader allows public HTTP on port 80 or HTTPS on port 443, with normal TLS certificate validation. Each HTTP redirect is validated, DNS answers are checked and pinned to the connection, and localhost/private/special-use destinations are blocked. No caller Authorization header or cookies are forwarded. Limits: an eight-second total fetch deadline, two-second connection/read timeouts, at most three redirects, a 1 MiB decompressed response, and four concurrent fetches. These guards protect the downloader; they do not classify the webpage as spam, and they do not run for basic shortening.
 
-Only the initial bounded HTML/plain-text response is inspected at creation time. The checker cannot assess JavaScript-rendered behavior, linked assets, authenticated pages, later page changes, or every kind of phishing/malware. For a deterministic interview demonstration, the content integration tests serve a normal article and a wallet-phrase collection page at the same URL, proving the decision changes with the **body**, not just the URL.
+In the AI flow, a blocked fetch target or an unsafe/ambiguous Gemini result returns **400**. Unsupported files, oversized/empty pages, unsuccessful HTTP responses (including bot blocking), unresolved hosts and redirect loops return **422**. Fetch/TLS failures, timeouts, busy fetching or unavailable Gemini return **503**. No mapping is saved if required fetching or AI assessment cannot finish. In basic mode, content-related failures do not apply because there is no content fetch or assessment.
+
+Gemini receives excerpts rather than an entire site or rendered browser state. AI assessment can be wrong, and it does not cover later content changes or previously saved links. A successful basic response carries no safety verdict; a successful AI confirmation means Gemini approved the fetched context at creation time, not that the destination is guaranteed safe.
 
 ## Run with Docker on Windows
 
@@ -129,7 +131,7 @@ java -jar target/url-shortener-0.0.1-SNAPSHOT.jar
 - **Gemini failures are bounded.** Connection timeout is 5 seconds; each request has a configurable 15-second deadline. Missing keys, provider HTTP errors, malformed responses and invalid generated slugs return **503** for required AI operations. Basic shortening, registration, login, listing and saved-link redirects do not call Gemini. The optional tagging step falls back to empty tags / `Uncategorized` if it fails after a successful safety check.
 - **Conservative safety parsing:** only the complete response `SAFE` is accepted, ignoring case/outer whitespace. `NOT SAFE`, `SAFETY` and other ambiguous answers are rejected. AI checks are heuristic and cannot guarantee a destination is safe.
 - **Untrusted input/output:** submitted destinations must parse as HTTP(S) URLs with a host and no embedded credentials; whitespace and invalid ports are rejected. Slugs and AI metadata are validated/bounded before persistence.
-- **Consistent errors:** duplicate emails return **409**, invalid HMAC pairs / unsafe results **400**, malformed JSON **400**, invalid or deleted-user JWTs JSON **401**, uninspectable destination pages **422**, and unexpected failures a generic **500**.
+- **Consistent errors:** duplicate emails return **409**, invalid HMAC pairs / unsafe results **400**, malformed JSON **400**, invalid or deleted-user JWTs JSON **401**, unreadable AI-flow destination pages **422**, and unexpected failures a generic **500**.
 - **One row per successful creation.** Slug collisions update the same reserved mapping with an ID-based Base62 suffix. Unique-constraint conflicts roll back and retry in a fresh transaction, up to three attempts. Long slugs leave room for the suffix within 100 characters.
 
 The redirect counter proves the server prepared a redirect after a successful database transaction; it cannot prove the browser followed the destination. A database outage still prevents redirects because reliable counting and mapping validity require PostgreSQL.
@@ -140,7 +142,7 @@ The redirect counter proves the server prepared a redirect after a successful da
 .\mvnw.cmd test
 ```
 
-The default suite uses isolated H2 databases, an in-memory cache and dynamic-port WireMock page/Gemini servers. No real API key is required and no paid Gemini requests are made. Coverage includes authentication, ownership isolation, slug collisions, preview routes, cache-hit counting, concurrent clicks, expiry/deletion, cache failure fallback, malformed URLs, AI deadlines/output checks, dependency errors, content rules, pinned DNS, private-address blocking, safe redirects, response limits and basic shortening with a blank Gemini key.
+The default suite uses isolated H2 databases, an in-memory cache and dynamic-port WireMock page/Gemini servers. No real API key is required and no paid Gemini requests are made. Coverage includes authentication, ownership isolation, slug collisions, preview routes, cache-hit counting, concurrent clicks, expiry/deletion, cache failure fallback, malformed URLs, AI deadlines/output checks, dependency errors, AI-only content decisions, context preparation, pinned DNS, private-address blocking for AI fetching, response limits and basic shortening with neither destination access nor a Gemini key.
 
 Real Redis / PostgreSQL tests are opt-in. Use **disposable** containers: the PostgreSQL test creates/drops its test schema. These tests must never point at an existing project database. For example:
 
@@ -155,10 +157,10 @@ docker rm -f linkly-test-redis linkly-test-postgres
 
 These checks use real HTTP requests and PostgreSQL atomic updates, Redis Lua quotas under concurrency, and serialization of cached expiry timestamps. The ordinary suite skips these opt-in tests when the properties are absent.
 
-To demonstrate content decisions without external websites or Gemini:
+To test both flows using controlled pages and mocked Gemini decisions:
 
 ```powershell
-.\mvnw.cmd "-Dtest=ContentShorteningIntegrationTest,ContentSafetyServiceTest,PageContentFetcherTest,PublicUrlPolicyTest" test
+.\mvnw.cmd "-Dtest=ContentShorteningIntegrationTest,PageContentServiceTest,PageContentFetcherTest,PublicUrlPolicyTest" test
 ```
 
 An optional real-HTTPS smoke check fetches only `https://example.com`:
@@ -192,4 +194,4 @@ There is no frontend, pagination, link editing/deletion API, refresh-token/logou
 
 ## Code layout
 
-`controller` defines routes, `service` handles auth/AI/creation/redirect lookup, `repository` performs persistence and atomic increments, `entity` defines users and mappings, `dto` defines payloads/cache metadata, `validation` checks submitted URL syntax, `safety` fetches and inspects destination content, `config` sets up security/cache/docs, and `util` contains JWT, HMAC and Base62 helpers.
+`controller` defines routes, `service` handles auth/AI/creation/redirect lookup, `repository` performs persistence and atomic increments, `entity` defines users and mappings, `dto` defines payloads/cache metadata, `validation` checks submitted URL syntax, `safety` safely fetches and prepares destination content for Gemini, `config` sets up security/cache/docs, and `util` contains JWT, HMAC and Base62 helpers.

@@ -14,7 +14,7 @@ import io.linkly.url_shortener.repository.UrlMappingRepository;
 import io.linkly.url_shortener.repository.UserRepository;
 import io.linkly.url_shortener.util.SlugVerificationUtil;
 import io.linkly.url_shortener.util.RandomShortCodeGenerator;
-import io.linkly.url_shortener.safety.ContentSafetyService;
+import io.linkly.url_shortener.safety.PageContentService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -36,16 +36,15 @@ public class UrlMappingService {
     private final UrlLookupService urlLookupService;
     private final AiService aiService;
     private final SlugVerificationUtil slugVerificationUtil;
-    private final ContentSafetyService contentSafetyService;
+    private final PageContentService pageContentService;
     private final RandomShortCodeGenerator randomShortCodeGenerator;
 
     @Value("${app.base-url}")
     private String baseUrl;
 
     public ShortenResponse shortenBasic(BasicShortenRequest request) {
-        // This route deliberately makes no AI calls, including optional tagging.
-        // A failed or incomplete content fetch blocks creation rather than silently skipping checks.
-        contentSafetyService.inspect(request.getOriginalUrl());
+        // Basic shortening only validates URL syntax, then saves it. It neither downloads
+        // the destination nor calls Gemini, so this route provides no spam/safety assessment.
         UrlMapping mapping = urlMappingCreationService.createMapping(request.getOriginalUrl(),
                 randomShortCodeGenerator.generate(), getCurrentUser(), "", "Uncategorized");
         return buildShortenResponse(mapping);
@@ -122,9 +121,9 @@ public class UrlMappingService {
                     "Invalid verification token — slug was not AI generated");
         }
 
-        // Apply the same local rules as basic shortening, then give Gemini actual fetched page text.
-        String pageText = contentSafetyService.inspect(request.getOriginalUrl());
-        boolean isSafe = aiService.checkIfSafe(request.getOriginalUrl(), pageText);
+        // Java fetches/prepares content; Gemini alone decides whether it is acceptable.
+        String pageContent = pageContentService.fetchForAi(request.getOriginalUrl());
+        boolean isSafe = aiService.checkIfSafe(request.getOriginalUrl(), pageContent);
         if (!isSafe) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "This URL has been flagged as unsafe");
         }

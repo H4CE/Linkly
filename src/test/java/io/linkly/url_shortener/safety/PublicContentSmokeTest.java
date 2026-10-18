@@ -7,9 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Optional real-HTTPS check; the default suite never depends on an external website. */
 @EnabledIfSystemProperty(named = "linkly.test.public-content", matches = "true")
 class PublicContentSmokeTest {
-    @Test void exampleDotComCanBeInspectedWithoutGemini() {
+    @Test void exampleDotComContentCanBePreparedForAi() {
         try (var fetcher = new PageContentFetcher(new PublicUrlPolicy(), new SafetyProperties())) {
-            String content = new ContentSafetyService(fetcher).inspect("https://example.com");
+            String content = new PageContentService(fetcher).fetchForAi("https://example.com");
             assertTrue(content.contains("Example Domain"));
         }
     }
