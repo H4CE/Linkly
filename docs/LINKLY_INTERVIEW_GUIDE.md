@@ -1,6 +1,6 @@
 # Linkly interview guide
 
-Read sections 1–7 first. Use the questions and expandable reference sections when you need more detail. For setup, start with the [README](README.md); for payloads, use the [API reference](API_REFERENCE.md).
+Read sections 1–7 first. Use the questions and expandable reference sections when you need more detail. For setup, start with the [README](../README.md); for payloads, use the [API reference](API_REFERENCE.md).
 
 ## 1. Explain the project in one minute
 
@@ -240,7 +240,7 @@ To run a packaged JAR instead:
 java -jar target/url-shortener-0.0.1-SNAPSHOT.jar
 ```
 
-The older `generate-secrets.cmd` remains available for manual setup. It prints only the two signing secrets and does not write `.env` or start services. The new `start-linkly.cmd` performs the complete Docker setup, including the database password.
+The manual helper `scripts/generate-secrets.cmd` remains available for setup without the automatic starter. Run `.\scripts\generate-secrets.cmd` from the project root. It prints only the two signing secrets and does not write `.env` or start services. The root `start-linkly.cmd` performs the complete Docker setup, including the database password.
 
 </details>
 

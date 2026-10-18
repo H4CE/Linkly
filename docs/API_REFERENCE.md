@@ -2,7 +2,7 @@
 
 Examples match the current application code, including the URL-listing endpoint added in commit `cc4335f`.
 
-For local startup, follow the [README](README.md). On Windows, `start-linkly.cmd` generates the required credentials, writes `.env`, and starts the Docker stack. A Gemini key is optional for basic shortening.
+For local startup, follow the [README](../README.md). On Windows, `start-linkly.cmd` generates the required credentials, writes `.env`, and starts the Docker stack. A Gemini key is optional for basic shortening.
 
 ## Base URL and request setup
 
@@ -484,6 +484,6 @@ General runtime failures usually return:
 
 If an AI endpoint returns 503 because the rate limiter is unavailable while Java runs on Windows and Redis runs through this project's Compose file, start Redis with `docker compose up -d redis`, verify `docker compose exec redis redis-cli ping` returns `PONG`, set `REDIS_HOST=localhost` and `REDIS_PORT=6380` for the Java process, and restart the application. A locally installed Redis service normally uses port 6379 instead.
 
-Gemini credentials belong in backend configuration, not in your API request bodies. Provider requests have a five-second connection timeout and a configurable 15-second request deadline. Missing keys and invalid provider output return 503 for required AI operations. Tags/category are bounded to fit database columns. Basic shortening, registration, login, listing, and existing-link redirects make no Gemini calls; suggestion, regeneration, and confirmation depend on it. The tracked configuration allows startup without a Gemini key; database and signing settings remain required. See README.md for Docker and local startup.
+Gemini credentials belong in backend configuration, not in your API request bodies. Provider requests have a five-second connection timeout and a configurable 15-second request deadline. Missing keys and invalid provider output return 503 for required AI operations. Tags/category are bounded to fit database columns. Basic shortening, registration, login, listing, and existing-link redirects make no Gemini calls; suggestion, regeneration, and confirmation depend on it. The tracked configuration allows startup without a Gemini key; database and signing settings remain required. See the [README](../README.md) for Docker and local startup.
 
 Destinations must be valid HTTP(S) URLs with a host (maximum 2048 characters), with no embedded username/password or invalid port. Arbitrary custom slugs are not exposed through a direct shortening endpoint.

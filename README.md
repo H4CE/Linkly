@@ -50,5 +50,5 @@ For manual Docker setup on another platform, copy `.env.example` to `.env`, repl
 
 ## More information
 
-- [API reference](API_REFERENCE.md): request bodies, responses, and copyable examples.
-- [Interview guide](LINKLY_INTERVIEW_GUIDE.md): architecture, design decisions, follow-up questions, testing, troubleshooting, and running Java without Docker.
+- [API reference](docs/API_REFERENCE.md): request bodies, responses, and copyable examples.
+- [Interview guide](docs/LINKLY_INTERVIEW_GUIDE.md): architecture, design decisions, follow-up questions, testing, troubleshooting, and running Java without Docker.
