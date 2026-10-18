@@ -1,3 +1,5 @@
+param([switch]$FollowLogs)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -152,12 +154,37 @@ function Wait-LinklyApplication {
     throw 'Linkly did not become healthy. Check docker compose logs app, or resolve a port/credential conflict and rerun setup.'
 }
 
+function Show-LinklyLogs {
+    param([string]$ProjectName)
+    $query = Invoke-LinklyDockerQuery @('ps', '--filter', "label=com.docker.compose.project=$ProjectName",
+        '--filter', 'label=com.docker.compose.service=app', '--format', '{{.ID}}')
+    if ($query.ExitCode -ne 0) { throw 'Could not identify the running app for live logs. Check Docker Desktop.' }
+    $ids = @($query.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($ids.Count -eq 0) {
+        Write-Host 'Linkly app has stopped.'
+        return
+    }
+    if ($ids.Count -ne 1 -or $ids[0] -notmatch '^[a-f0-9]{12,64}$') {
+        throw 'Could not identify a single Linkly app container for live logs.'
+    }
+    Write-Host 'Showing live application logs. Run stop-linkly.cmd to stop the stack.'
+    Write-Host 'Closing this window leaves the Docker containers running.'
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $script:LinklyDockerCommand logs --follow --tail 50 $ids[0]
+        $logsExitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($logsExitCode -ne 0) { throw 'The live log stream failed. Check Docker Desktop or run docker compose logs app.' }
+    Write-Host 'Application log stream ended.'
+}
+
 function Start-Linkly {
-    param([string]$ProjectDirectory)
+    param([string]$ProjectDirectory, [switch]$FollowLogs)
     $ProjectDirectory = [IO.Path]::GetFullPath($ProjectDirectory)
     $lockPath = Join-Path $ProjectDirectory '.linkly-setup.lock'
     try { $setupLock = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
-    catch { throw 'Another setup may already be running. Close it before rerunning start-linkly.cmd.' }
+    catch { throw 'Linkly startup or shutdown is already in progress. Wait for it to finish, then retry.' }
     try {
         $docker = Get-Command docker -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($null -eq $docker) { throw 'Docker was not found. Install Docker Desktop, then rerun start-linkly.cmd.' }
@@ -204,10 +231,13 @@ function Start-Linkly {
         $setupLock.Dispose()
         Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
     }
+    # Release the setup lock before following logs, so stop-linkly.cmd can run
+    # in another window while this one remains open for the lifetime of the app.
+    if ($FollowLogs) { Show-LinklyLogs -ProjectName $projectName }
 }
 
 # Dot-sourcing exposes helpers to the isolated setup tests without starting Docker.
 if ($MyInvocation.InvocationName -ne '.') {
-    try { Start-Linkly -ProjectDirectory (Split-Path $PSScriptRoot -Parent) }
+    try { Start-Linkly -ProjectDirectory (Split-Path $PSScriptRoot -Parent) -FollowLogs:$FollowLogs }
     catch { Write-Host ("Setup failed: " + $_.Exception.Message) -ForegroundColor Red; exit 1 }
 }

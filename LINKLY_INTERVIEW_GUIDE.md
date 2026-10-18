@@ -167,7 +167,11 @@ Fetch-specific errors apply to AI confirmation. Basic shortening does not depend
 4. Log in as a second user and show that their list excludes the first user's links.
 5. If a working Gemini key is available, suggest a readable slug and confirm it. Explain why the preview was not saved yet.
 
-The Windows helper generates three independent 48-byte random credentials and writes them to a Git-ignored `.env`. It preserves existing configured values, handles paths with spaces, waits for Docker and application readiness, and returns a failure exit code if setup fails. It uses a PowerShell helper under `scripts/`; double-click and terminal execution use the same workflow.
+The Windows helper generates three independent 48-byte random credentials and writes them to a Git-ignored `.env`. It preserves existing configured values, handles paths with spaces, waits for Docker and application readiness, and returns a failure exit code if setup fails. Both CMD files use PowerShell helpers under `scripts/`.
+
+Startup follows live app logs until the app stops. Closing the log window leaves the containers running. Use `stop-linkly.cmd` in another window to stop the app first, then PostgreSQL and Redis. Use `--no-pause` for one-shot startup or unattended shutdown.
+
+Shutdown uses Compose project/service labels, preserves containers, volumes and `.env`, and leaves Docker Desktop and unrelated projects running. It works even when credentials are missing because shutdown does not interpolate the Compose configuration. Startup releases its setup lock before following logs so shutdown is not blocked.
 
 Docker initializes the database password on the first run and stores database data in a named volume. Generating a different password later does not change that stored password. If the old database exists but `.env` has no password, the helper stops so you can restore it. Normal restarts preserve both credentials and data.
 
@@ -278,7 +282,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\tests\Test-Sta
 
 The ordinary Java suite uses isolated H2 databases, an in-memory cache, and dynamic-port WireMock servers. It needs no real Gemini key. Tests cover basic creation with no AI/fetching, AI-only content decisions, HMAC validation, authentication/ownership, collision recovery, cache-hit/concurrent counting, expiry/deletion, dependency errors, content limits, and DNS/private-address protections.
 
-The setup tests use temporary fixtures and a fake Docker command. They check credential generation/preservation, missing-password protection, duplicate settings, explicit `.env` use, readiness orchestration, failure propagation, and cleanup. They do not modify the project's real `.env` or start Docker.
+The setup tests use temporary fixtures and a fake Docker command. They check credential generation/preservation, missing-password protection, duplicate settings, explicit `.env` use, readiness and live-log orchestration, graceful shutdown order, project isolation, repeated stops, failure propagation, and cleanup. They do not modify the project's real `.env` or start Docker.
 
 Optional tests use real dependencies. Use disposable containers only: the PostgreSQL test creates/drops its test schema.
 

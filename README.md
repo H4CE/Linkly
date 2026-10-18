@@ -19,9 +19,9 @@ Install Docker Desktop with Linux containers enabled. Run the following from the
 .\start-linkly.cmd
 ```
 
-The script starts Docker Desktop if needed, generates a random database password and two independent signing secrets, writes them to `.env`, and builds and starts PostgreSQL, Redis, and Linkly. It waits for the application to become healthy before showing the Swagger address. No local Java, Maven, PostgreSQL, Redis, or separate Ubuntu installation is required. The first build needs internet access.
+The script starts Docker Desktop if needed, generates a random database password and two independent signing secrets, writes them to `.env`, and builds and starts PostgreSQL, Redis, and Linkly. It waits for the application to become healthy, shows the Swagger address, and keeps the window open with live application logs. No local Java, Maven, PostgreSQL, Redis, or separate Ubuntu installation is required. The first build needs internet access.
 
-**Rerunning the script preserves configured credentials and database data.** If an existing database is found but its password is missing, restore its original `DB_PASSWORD` in `.env` before rerunning. Keep `.env` private; it is excluded from Git. For a terminal run without the closing pause, use `.\start-linkly.cmd --no-pause`.
+**Rerunning the script preserves configured credentials and database data.** If an existing database is found but its password is missing, restore its original `DB_PASSWORD` in `.env` before rerunning. Keep `.env` private; it is excluded from Git. For one-shot startup without live logs or a closing pause, use `.\start-linkly.cmd --no-pause`.
 
 ### Try the application
 
@@ -38,9 +38,11 @@ For AI features, set `GEMINI_API_KEY` in `.env` and rerun the script. Then use *
 
 ```powershell
 docker compose logs -f app  # View application logs
-docker compose down         # Stop; keep database data
+.\stop-linkly.cmd           # Stop app, PostgreSQL and Redis; keep data
 .\start-linkly.cmd          # Start again
 ```
+
+Double-click `stop-linkly.cmd` or run it in another terminal. It stops only this project's containers, preserving `.env` and database storage. Docker Desktop stays running. Closing the startup window alone leaves the containers running; use the stop script to shut down the stack. The startup log window ends when the app stops.
 
 Default host ports: **8080** for Linkly, **5433** for PostgreSQL, and **6380** for Redis. Keep these available. An existing standalone container named `linkly-redis` must also be stopped and renamed before Compose can use that name; see the guide's troubleshooting section. Avoid `docker compose down -v` unless you intend to delete the database.
 

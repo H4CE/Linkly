@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'start-linkly.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'stop-linkly.ps1')
 
 # Run with Windows PowerShell 5.1, the same runtime used by start-linkly.cmd.
 # Fixtures stay under ignored target/. These tests never start real containers.
@@ -115,11 +116,16 @@ try {
         $script:queryCalls = New-Object System.Collections.Generic.List[string]
         $script:healthChecked = $false
         $script:failConfig = $false
+        $script:logContainer = @('aaaaaaaaaaaa')
         function Wait-LinklyDocker { }
         function Test-LinklyExistingDatabase { param([string]$ProjectName); return $false }
         function Invoke-LinklyDockerQuery {
             param([string[]]$ArgumentList)
             $script:queryCalls.Add(($ArgumentList -join '|'))
+            if ($ArgumentList[0] -eq 'ps') {
+                Assert-Setup (-not (Test-Path -LiteralPath (Join-Path $fresh '.linkly-setup.lock'))) 'Live logs hold the setup lock and block shutdown.'
+                return [pscustomobject]@{ ExitCode = 0; Output = $script:logContainer }
+            }
             if ($ArgumentList -contains 'config') {
                 Assert-Setup ([string]::IsNullOrEmpty($env:DB_PASSWORD)) 'Shell password still overrides .env.'
                 if ($script:failConfig) { return [pscustomobject]@{ ExitCode = 1; Output = @() } }
@@ -152,6 +158,84 @@ try {
         Expect-Failure { Start-Linkly $fresh } 'Compose configuration is invalid'
         Assert-Setup (-not (Test-Path -LiteralPath (Join-Path $fresh '.linkly-setup.lock'))) 'Failure left a setup lock.'
         Pass-Case 'invalid configuration fails cleanly and releases the setup lock'
+
+        $script:failConfig = $false
+        $env:LINKLY_TEST_DOCKER_EXIT = '0'
+        Start-Linkly $fresh -FollowLogs
+        Assert-Setup (($script:queryCalls -join "`n").Contains('label=com.docker.compose.service=app')) 'Live logs did not select the app service.'
+        Pass-Case 'live logs start after readiness and after the setup lock is released'
+
+        $env:LINKLY_TEST_DOCKER_EXIT = '7'
+        Expect-Failure { Show-LinklyLogs 'linkly-setup-test' } 'live log stream failed'
+        $script:logContainer = @()
+        Show-LinklyLogs 'linkly-setup-test'
+        Pass-Case 'log failures are reported and an app already stopped ends normally'
+
+        $script:runningServices = @{ app = 'aaaaaaaaaaaa'; postgres = 'bbbbbbbbbbbb'; redis = 'cccccccccccc' }
+        $script:stopCalls = New-Object System.Collections.Generic.List[string]
+        $script:failDiscovery = $false
+        $script:failAppStop = $false
+        function Invoke-LinklyDockerQuery {
+            param([string[]]$ArgumentList)
+            if ($ArgumentList[0] -eq 'ps') {
+                Assert-Setup ($ArgumentList -contains 'label=com.docker.compose.project=linkly-setup-test') 'Shutdown selected another Compose project.'
+                $serviceLabel = @($ArgumentList | Where-Object { $_ -like 'label=com.docker.compose.service=*' })[0]
+                $service = $serviceLabel.Substring($serviceLabel.LastIndexOf('=') + 1)
+                if ($script:failDiscovery -and $service -eq 'postgres') {
+                    return [pscustomobject]@{ ExitCode = 1; Output = @() }
+                }
+                $output = if ($script:runningServices.ContainsKey($service)) { @($script:runningServices[$service]) } else { @() }
+                return [pscustomobject]@{ ExitCode = 0; Output = $output }
+            }
+            if ($ArgumentList[0] -eq 'stop') {
+                Assert-Setup ($ArgumentList[1] -eq '--time' -and $ArgumentList[2] -eq '30') 'Shutdown did not allow graceful termination.'
+                $script:stopCalls.Add($ArgumentList[3])
+                if ($script:failAppStop -and $ArgumentList[3] -eq 'aaaaaaaaaaaa') {
+                    return [pscustomobject]@{ ExitCode = 1; Output = @() }
+                }
+                return [pscustomobject]@{ ExitCode = 0; Output = @() }
+            }
+            Assert-Setup ($ArgumentList[0] -eq 'info') 'Shutdown issued an unexpected Docker operation.'
+            return [pscustomobject]@{ ExitCode = 0; Output = @() }
+        }
+        Stop-Linkly $fresh
+        Assert-Setup (($script:stopCalls -join ',') -eq 'aaaaaaaaaaaa,bbbbbbbbbbbb,cccccccccccc') 'Shutdown did not stop the app before its dependencies.'
+        Assert-Setup ((Read-Environment $fresh) -ceq $text) 'Shutdown modified credentials.'
+        Pass-Case 'shutdown stops only this project, app first, preserving .env'
+
+        $noEnv = New-Fixture 'shutdown without credentials'
+        $script:stopCalls.Clear()
+        Stop-Linkly $noEnv
+        Assert-Setup (-not (Test-Path -LiteralPath (Join-Path $noEnv '.env'))) 'Shutdown generated credentials.'
+        Pass-Case 'shutdown works without .env or credential generation'
+
+        $script:runningServices = @{}
+        $script:stopCalls.Clear()
+        Stop-Linkly $fresh
+        Assert-Setup ($script:stopCalls.Count -eq 0) 'Already stopped stack caused container mutations.'
+        Pass-Case 'repeated shutdown is harmless'
+
+        $script:runningServices = @{ app = 'aaaaaaaaaaaa'; postgres = 'bbbbbbbbbbbb'; redis = 'cccccccccccc' }
+        $script:failAppStop = $true
+        Expect-Failure { Stop-Linkly $fresh } 'Could not stop Linkly app'
+        Assert-Setup (($script:stopCalls -join ',') -eq 'aaaaaaaaaaaa') 'Dependencies stopped after app shutdown failed.'
+        Assert-Setup (-not (Test-Path -LiteralPath (Join-Path $fresh '.linkly-setup.lock'))) 'Shutdown failure left the setup lock.'
+        Pass-Case 'failed app shutdown keeps dependencies running and releases the lock'
+
+        $script:failAppStop = $false
+        $script:failDiscovery = $true
+        $script:stopCalls.Clear()
+        Expect-Failure { Stop-Linkly $fresh } 'Nothing was stopped'
+        Assert-Setup ($script:stopCalls.Count -eq 0) 'Shutdown acted on incomplete container discovery.'
+        Pass-Case 'container discovery failures stop nothing'
+
+        $heldLock = [IO.File]::Open((Join-Path $fresh '.linkly-setup.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+        try { Expect-Failure { Stop-Linkly $fresh } 'already in progress' }
+        finally {
+            $heldLock.Dispose()
+            Remove-Item -LiteralPath (Join-Path $fresh '.linkly-setup.lock') -Force
+        }
+        Pass-Case 'shutdown cannot race an in-progress startup'
     } finally {
         $env:PATH = $savedPath
         $env:DB_PASSWORD = $savedPassword
