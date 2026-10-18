@@ -64,13 +64,21 @@ Run these commands from the folder containing `pom.xml` and `docker-compose.yml`
    ```
    Copy the printed `JWT_SECRET=...` and `VERIFICATION_SECRET=...` lines into `.env`, replacing the examples. The helper uses Windows PowerShell's cryptographic random generator to create two independent 48-byte secrets (64 Base64 characters each). It only prints them; it does not create or modify `.env`. Use `--no-pause` when running it from automation.
 
-   Choose a strong `DB_PASSWORD` for a fresh database and add your Gemini key to enable new-link AI features. Docker sets that password when it initializes PostgreSQL; no manual database creation is needed.
+   Choose a strong `DB_PASSWORD` for a fresh database. Docker sets that password when it initializes PostgreSQL; no manual database creation is needed. **Only these three values are required in `.env` for Docker startup:**
+
+   ```dotenv
+   DB_PASSWORD=your-database-password
+   JWT_SECRET=your-generated-jwt-secret
+   VERIFICATION_SECRET=your-generated-verification-secret
+   ```
+
+   **`GEMINI_API_KEY` is optional:** omit it or leave it empty. Registration, login, basic shortening, listing and existing-link redirects work without it. AI suggestion, regeneration and confirmation require a working key and otherwise return `503`.
 3. Start:
    ```powershell
    docker compose up --build -d
    docker compose logs -f app
    ```
-4. Open Swagger UI and try register → suggest → confirm → redirect → list.
+4. Open Swagger UI and try register → basic shorten → redirect → list. With a Gemini key configured, you can also try suggest → confirm.
 
 Host ports: application **8080**, PostgreSQL **5433**, Redis **6380**. Containers communicate internally on 5432 / 6379. PostgreSQL data persists in the named volume.
 
@@ -180,7 +188,7 @@ An optional real-HTTPS smoke check fetches only `https://example.com`:
 | `JWT_SECRET` | JWT signing secret, at least 32 characters | Required |
 | `JWT_EXPIRY` | JWT lifetime in milliseconds | 86400000 |
 | `VERIFICATION_SECRET` | Independent HMAC signing secret | Required |
-| `GEMINI_API_KEY` | Key for required AI operations | Empty; AI routes return 503 |
+| `GEMINI_API_KEY` | Optional; enables AI operations | Empty; AI routes return 503 |
 | `GEMINI_API_URL` | Gemini generateContent endpoint | gemini-2.5-flash-lite endpoint |
 | `GEMINI_TIMEOUT_SECONDS` | Per-provider-request deadline | 15 |
 | `CONTENT_CHECK_TIMEOUT_SECONDS` | Total page-fetch deadline (1-30 seconds) | 8 |
