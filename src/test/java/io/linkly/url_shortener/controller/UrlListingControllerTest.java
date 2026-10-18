@@ -63,7 +63,7 @@ class UrlListingControllerTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        cacheManager.getCache("urls").clear();
+        cacheManager.getCache("urlDestinations").clear();
         token = register("owner@example.com");
         register("other@example.com");
         currentUser = userRepository.findByEmail("owner@example.com").orElseThrow();

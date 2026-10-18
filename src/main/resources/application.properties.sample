@@ -1,44 +1,13 @@
-# Copy this file to application.properties and fill in your values
+# Optional local overrides. Defaults live in tracked application.yaml.
+# Configure environment variables as described in README.md.
+# Copy to application.properties only if you need overrides; never commit secrets.
+# This file takes precedence over YAML for matching property names.
 
-spring.application.name=url-shortener
-server.port=8080
-
-spring.datasource.url=jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:url_shortener}
-spring.datasource.username=${DB_USERNAME:postgres}
-spring.datasource.password=YOUR_POSTGRES_PASSWORD_HERE
-spring.datasource.driver-class-name=org.postgresql.Driver
-
-spring.jpa.hibernate.ddl-auto=update
-spring.jpa.show-sql=true
-spring.jpa.properties.hibernate.format_sql=true
-spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
-
-spring.data.redis.host=${REDIS_HOST:localhost}
-spring.data.redis.port=${REDIS_PORT:6379}
-spring.cache.type=redis
-spring.cache.redis.time-to-live=3600000
-
-app.jwt.secret=YOUR_JWT_SECRET_HERE
-app.jwt.expiry=86400000
-
+spring.datasource.password=${DB_PASSWORD}
+app.jwt.secret=${JWT_SECRET}
+app.verification.secret=${VERIFICATION_SECRET}
+app.gemini.api-key=${GEMINI_API_KEY:}
 app.base-url=${APP_BASE_URL:http://localhost:8080}
-
-app.verification.secret=YOUR_VERIFICATION_SECRET_HERE
-
-app.gemini.api-key=YOUR_GEMINI_API_KEY_HERE
-app.gemini.api-url=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent
-app.gemini.max-slug-length=30
-app.gemini.max-tags=5
-
-management.endpoints.web.exposure.include=health,info,metrics,loggers
-management.endpoint.health.show-details=always
-management.info.env.enabled=true
-info.app.name=Linkly
-info.app.description=AI-powered URL shortener with JWT auth
-info.app.version=1.0.0
-info.app.phase=Portfolio Project
-
-springdoc.swagger-ui.path=/swagger-ui.html
-springdoc.api-docs.path=/v3/api-docs
-springdoc.swagger-ui.operationsSorter=method
-springdoc.swagger-ui.tagsSorter=alpha
+# Java on Windows + Redis from this project's Compose stack:
+spring.data.redis.host=${REDIS_HOST:localhost}
+spring.data.redis.port=${REDIS_PORT:6380}

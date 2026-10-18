@@ -12,6 +12,6 @@ public class TestCacheConfig {
     @Bean
     @Primary
     public CacheManager testCacheManager() {
-        return new ConcurrentMapCacheManager("urls");
+        return new ConcurrentMapCacheManager("urlDestinations");
     }
 }

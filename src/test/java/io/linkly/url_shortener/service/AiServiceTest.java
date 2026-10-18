@@ -3,6 +3,12 @@ package io.linkly.url_shortener.service;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.AfterAll;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Map;
+import io.linkly.url_shortener.exception.ApiException;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -27,10 +33,11 @@ class AiServiceTest {
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
         wireMockServer = new WireMockServer(
-                WireMockConfiguration.wireMockConfig().port(9999));
+                WireMockConfiguration.wireMockConfig().dynamicPort());
         wireMockServer.start();
+        registry.add("app.gemini.timeout-seconds", () -> "1");
         registry.add("app.gemini.api-url",
-                () -> "http://localhost:9999/mock-gemini");
+                () -> wireMockServer.baseUrl() + "/mock-gemini");
     }
 
     @BeforeEach
@@ -45,24 +52,17 @@ class AiServiceTest {
 
     // ── Helper ────────────────────────────────────────────────────────
 
-    private void stubGeminiResponse(String responseText) {
-        wireMockServer.stubFor(
-                post(urlPathMatching("/mock-gemini.*"))
-                        .willReturn(aResponse()
-                                .withStatus(200)
-                                .withHeader("Content-Type", "application/json")
-                                .withBody(String.format("""
-                                        {
-                                            "candidates": [{
-                                                "content": {
-                                                    "parts": [{"text": "%s"}]
-                                                }
-                                            }]
-                                        }
-                                        """, responseText))));
-    }
+    @AfterAll
+    static void stopServer() { wireMockServer.stop(); }
 
-    // ── generateSlug tests ────────────────────────────────────────────
+    private void stubGeminiResponse(String responseText) {
+        try {
+            String body = new ObjectMapper().writeValueAsString(Map.of("candidates", List.of(
+                    Map.of("content", Map.of("parts", List.of(Map.of("text", responseText)))))));
+            wireMockServer.stubFor(post(urlPathEqualTo("/mock-gemini"))
+                    .willReturn(okJson(body)));
+        } catch (Exception ex) { throw new AssertionError(ex); }
+    }
 
     @Test
     @DisplayName("generateSlug returns trimmed lowercase slug from AI response")
@@ -164,8 +164,8 @@ class AiServiceTest {
     @DisplayName("generateTags returns parsed tags and category")
     void generateTags_validResponse_returnsTagsAndCategory() {
         stubGeminiResponse(
-                "{\\\"tags\\\": [\\\"java\\\", \\\"spring\\\"], " +
-                        "\\\"category\\\": \\\"Technology\\\"}");
+                "{\"tags\": [\"java\", \"spring\"], " +
+                        "\"category\": \"Technology\"}");
 
         AiService.AiTagResult result = aiService.generateTags(
                 "https://www.baeldung.com/spring-boot");
@@ -192,14 +192,92 @@ class AiServiceTest {
     @DisplayName("generateTags handles markdown wrapped JSON from AI")
     void generateTags_markdownWrappedJson_returnsTagsAndCategory() {
         stubGeminiResponse(
-                "```json\\n{\\\"tags\\\": [\\\"java\\\"], " +
-                        "\\\"category\\\": \\\"Tech\\\"}\\n```");
+                "```json\n{\"tags\": [\"java\"], " +
+                        "\"category\": \"Tech\"}\n```");
 
         AiService.AiTagResult result = aiService.generateTags(
                 "https://www.baeldung.com/spring-boot");
 
         assertNotNull(result);
-        assertNotNull(result.category());
+        assertEquals(List.of("java"), result.tags());
+        assertEquals("Tech", result.category());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"NOT SAFE", "SAFETY", "SAFE but suspicious", "UNKNOWN"})
+    void ambiguousSafetyResponsesAreNeverAccepted(String text) {
+        stubGeminiResponse(text);
+        assertFalse(aiService.checkIfSafe("https://example.com"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"not a slug", "https://example.com", "---", "a" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+    void invalidGeneratedSlugsAreRejected(String text) {
+        stubGeminiResponse(text);
+        assertThrows(ApiException.class, () -> aiService.generateSlug("https://example.com"));
+    }
+
+    @Test void regenerationMustActuallyChangeTheSlug() {
+        stubGeminiResponse("same-slug");
+        assertThrows(ApiException.class, () -> aiService.regenerateSlug("https://example.com", "same-slug"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {400, 401, 403, 429, 500, 503})
+    void providerErrorsReturnControlledUnavailableError(int code) {
+        wireMockServer.stubFor(post(urlPathEqualTo("/mock-gemini"))
+                .willReturn(aResponse().withStatus(code).withBody("provider diagnostic")));
+        var ex = assertThrows(ApiException.class, () -> aiService.generateSlug("https://example.com"));
+        assertEquals(503, ex.getStatus().value());
+        assertFalse(ex.getMessage().contains("provider diagnostic"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"candidates\":[]}", "not json"})
+    void missingAndMalformedResponsesAreHandled(String body) {
+        wireMockServer.stubFor(post(urlPathEqualTo("/mock-gemini"))
+                .willReturn(okJson(body)));
+        assertThrows(ApiException.class, () -> aiService.generateSlug("https://example.com"));
+    }
+
+    @Test void stalledProviderIsBoundedByRequestDeadline() {
+        wireMockServer.stubFor(post(urlPathEqualTo("/mock-gemini"))
+                .willReturn(okJson("{}").withFixedDelay(2000)));
+        assertTimeout(java.time.Duration.ofSeconds(4), () ->
+                assertThrows(ApiException.class, () -> aiService.generateSlug("https://example.com")));
+    }
+
+    @Test void requestUsesJsonEncodingAndKeepsKeyOutOfQueryString() {
+        stubGeminiResponse("valid-slug");
+        aiService.generateSlug("https://example.com/a?x=\"quoted\"&y=\\tab");
+        wireMockServer.verify(postRequestedFor(urlEqualTo("/mock-gemini"))
+                .withHeader("x-goog-api-key", equalTo("test-key"))
+                .withRequestBody(matchingJsonPath("$.contents[0].parts[0].text")));
+    }
+
+    @Test void oversizedMetadataCannotOverflowDatabaseColumns() throws Exception {
+        stubGeminiResponse(new ObjectMapper().writeValueAsString(Map.of("tags",
+                List.of("a".repeat(200), "b".repeat(200), "one", "two", "three", "four", "five"),
+                "category", "x".repeat(500))));
+        var result = aiService.generateTags("https://example.com");
+        assertTrue(String.join(",", result.tags()).length() <= 255);
+        assertTrue(result.tags().size() <= 5);
+        assertEquals(255, result.category().length());
+    }
+
+    @Test void missingApiKeyFailsBeforeCallingProvider() {
+        org.springframework.test.util.ReflectionTestUtils.setField(aiService, "apiKey", "");
+        try {
+            var ex = assertThrows(ApiException.class, () -> aiService.generateSlug("https://example.com"));
+            assertEquals(503, ex.getStatus().value());
+            wireMockServer.verify(0, postRequestedFor(urlPathEqualTo("/mock-gemini")));
+        } finally {
+            org.springframework.test.util.ReflectionTestUtils.setField(aiService, "apiKey", "test-key");
+        }
+    }
+
+    @Test void optionalTaggingFallsBackOnProviderFailure() {
+        wireMockServer.stubFor(post(urlPathEqualTo("/mock-gemini")).willReturn(aResponse().withStatus(503)));
+        assertEquals(new AiService.AiTagResult(List.of(), "Uncategorized"), aiService.generateTags("https://example.com"));
+    }
 }

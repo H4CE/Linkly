@@ -7,6 +7,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
@@ -50,21 +51,18 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<Map<String, Object>> handleRuntimeException(RuntimeException ex) {
-        if (ex.getMessage().contains("unsafe")) {
-            return buildResponse(HttpStatus.BAD_REQUEST, ex.getMessage());
-        }
-        if (ex.getMessage() != null && ex.getMessage().contains("verification token")) {
-            return buildResponse(HttpStatus.BAD_REQUEST, ex.getMessage());
-        }
         return buildResponse(HttpStatus.INTERNAL_SERVER_ERROR, "Something went wrong");
     }
 
-    //    @ExceptionHandler(Exception.class)
-//    public ResponseEntity<Map<String, Object>> handleGeneric(Exception ex) {
-//        System.out.println("EXCEPTION TYPE: " + ex.getClass().getName());
-//        System.out.println("EXCEPTION MESSAGE: " + ex.getMessage());
-//        return buildResponse(HttpStatus.INTERNAL_SERVER_ERROR, "Something went wrong");
-//    }
+    @ExceptionHandler(ApiException.class)
+    public ResponseEntity<Map<String, Object>> handleApiException(ApiException ex) {
+        return buildResponse(ex.getStatus(), ex.getMessage());
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, Object>> handleMalformedJson(HttpMessageNotReadableException ex) {
+        return buildResponse(HttpStatus.BAD_REQUEST, "Malformed JSON request");
+    }
 
     private ResponseEntity<Map<String, Object>> buildResponse(HttpStatus status, String message) {
         Map<String, Object> body = new HashMap<>();

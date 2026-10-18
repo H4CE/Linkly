@@ -2,6 +2,8 @@ package io.linkly.url_shortener.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.linkly.url_shortener.exception.ApiException;
+import org.springframework.http.HttpStatus;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -12,12 +14,15 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.time.Duration;
 
 @Service
 @RequiredArgsConstructor
 public class AiService {
 
-    @Value("${app.gemini.api-key}")
+    @Value("${app.gemini.api-key:}")
     private String apiKey;
 
     @Value("${app.gemini.api-url}")
@@ -30,7 +35,11 @@ public class AiService {
     private int maxTags;
 
     private final ObjectMapper objectMapper;
-    private final HttpClient httpClient = HttpClient.newHttpClient();
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5)).build();
+
+    @Value("${app.gemini.timeout-seconds:15}")
+    private int timeoutSeconds;
 
     public String generateSlug(String originalUrl) {
         String prompt = String.format(
@@ -43,7 +52,7 @@ public class AiService {
                         "- Return ONLY the slug, nothing else, no explanation",
                 originalUrl, maxSlugLength
         );
-        return callGemini(prompt).trim().toLowerCase();
+        return validateSlug(callGemini(prompt));
     }
 
     public String regenerateSlug(String originalUrl, String previousSlug) {
@@ -58,7 +67,11 @@ public class AiService {
                         "- Return ONLY the slug, nothing else, no explanation",
                 originalUrl, maxSlugLength, previousSlug
         );
-        return callGemini(prompt).trim().toLowerCase();
+        String slug = validateSlug(callGemini(prompt));
+        if (slug.equalsIgnoreCase(previousSlug)) {
+            throw unavailable();
+        }
+        return slug;
     }
 
     public boolean checkIfSafe(String originalUrl) {
@@ -67,11 +80,11 @@ public class AiService {
                         "Rules:\n" +
                         "- Respond with ONLY one word: SAFE or UNSAFE\n" +
                         "- Consider phishing, malware, adult content as UNSAFE\n" +
-                        "- When in doubt, respond SAFE",
+                        "- When in doubt, respond UNSAFE",
                 originalUrl
         );
-        String response = callGemini(prompt).trim().toUpperCase();
-        return response.contains("SAFE") && !response.contains("UNSAFE");
+        // Substring matching incorrectly accepted responses such as 'NOT SAFE'.
+        return "SAFE".equalsIgnoreCase(callGemini(prompt).trim());
     }
 
     public AiTagResult generateTags(String originalUrl) {
@@ -94,8 +107,20 @@ public class AiService {
 
             JsonNode root = objectMapper.readTree(response);
             List<String> tags = new ArrayList<>();
-            root.path("tags").forEach(tag -> tags.add(tag.asText()));
-            String category = root.path("category").asText("Uncategorized");
+            // AI output is untrusted: enforce the actual VARCHAR(255) storage limits.
+            if (root.path("tags").isArray()) {
+                for (JsonNode tag : root.path("tags")) {
+                    if (tags.size() >= maxTags) break;
+                    if (!tag.isTextual()) continue;
+                    String value = tag.asText().trim().replace(",", " ");
+                    if (!value.isEmpty() && String.join(",", tags).length() + value.length()
+                            + (tags.isEmpty() ? 0 : 1) <= 255) tags.add(value);
+                }
+            }
+            String category = root.path("category").isTextual()
+                    ? root.path("category").asText().trim() : "Uncategorized";
+            if (category.isEmpty()) category = "Uncategorized";
+            if (category.length() > 255) category = category.substring(0, 255);
             return new AiTagResult(tags, category);
 
         } catch (Exception e) {
@@ -104,23 +129,15 @@ public class AiService {
     }
 
     private String callGemini(String prompt) {
+        if (apiKey == null || apiKey.isBlank()) throw unavailable();
         try {
-            String requestBody = String.format("""
-                    {
-                        "contents": [
-                            {
-                                "parts": [
-                                    {
-                                        "text": "%s"
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                    """, escapeJson(prompt));
+            String requestBody = objectMapper.writeValueAsString(Map.of("contents",
+                    List.of(Map.of("parts", List.of(Map.of("text", prompt))))));
 
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(apiUrl + "?key=" + apiKey))
+                    .uri(URI.create(apiUrl))
+                    .timeout(Duration.ofSeconds(timeoutSeconds))
+                    .header("x-goog-api-key", apiKey)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
@@ -130,28 +147,30 @@ public class AiService {
                     HttpResponse.BodyHandlers.ofString()
             );
 
+            if (response.statusCode() < 200 || response.statusCode() >= 300) throw unavailable();
             JsonNode root = objectMapper.readTree(response.body());
-            return root
-                    .path("candidates")
-                    .get(0)
-                    .path("content")
-                    .path("parts")
-                    .get(0)
-                    .path("text")
-                    .asText();
-
-        } catch (Exception e) {
-            throw new RuntimeException("Gemini API call failed: " + e.getMessage());
+            JsonNode text = root.path("candidates").path(0).path("content").path("parts").path(0).path("text");
+            if (!text.isTextual() || text.asText().isBlank()) throw unavailable();
+            return text.asText();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw unavailable();
+        } catch (Exception ex) {
+            // Do not expose provider response bodies or credentials in API errors.
+            throw unavailable();
         }
     }
 
-    private String escapeJson(String text) {
-        return text
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
+    private String validateSlug(String text) {
+        String slug = text.trim().toLowerCase(Locale.ROOT);
+        if (slug.length() > Math.min(maxSlugLength, 100) || !slug.matches("[a-z0-9]+(?:-[a-z0-9]+)*")) {
+            throw unavailable();
+        }
+        return slug;
+    }
+
+    private ApiException unavailable() {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "AI service unavailable or returned an invalid response");
     }
 
     public record AiTagResult(List<String> tags, String category) {}

@@ -8,13 +8,13 @@ import io.linkly.url_shortener.dto.response.SuggestResponse;
 import io.linkly.url_shortener.entity.UrlMapping;
 import io.linkly.url_shortener.entity.User;
 import io.linkly.url_shortener.exception.UrlNotFoundException;
+import io.linkly.url_shortener.exception.ApiException;
 import io.linkly.url_shortener.repository.UrlMappingRepository;
 import io.linkly.url_shortener.repository.UserRepository;
 import io.linkly.url_shortener.util.SlugVerificationUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.cache.annotation.CacheEvict;
-import org.springframework.cache.annotation.Cacheable;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,6 +30,7 @@ public class UrlMappingService {
     private final UrlMappingRepository urlMappingRepository;
     private final UserRepository userRepository;
     private final UrlMappingCreationService urlMappingCreationService;
+    private final UrlLookupService urlLookupService;
     private final AiService aiService;
     private final SlugVerificationUtil slugVerificationUtil;
 
@@ -56,7 +57,7 @@ public class UrlMappingService {
         return SuggestResponse.builder()
                 .originalUrl(request.getOriginalUrl())
                 .suggestedSlug(slug)
-                .suggestedShortUrl(baseUrl + "/" + slug)
+                .suggestedShortUrl(buildShortUrl(slug))
                 .verificationToken(token)
                 .build();
     }
@@ -72,7 +73,7 @@ public class UrlMappingService {
         );
 
         if (!isValid) {
-            throw new RuntimeException(
+            throw new ApiException(HttpStatus.BAD_REQUEST,
                     "Invalid verification token — previous slug was not AI generated");
         }
 
@@ -87,13 +88,12 @@ public class UrlMappingService {
         return SuggestResponse.builder()
                 .originalUrl(request.getOriginalUrl())
                 .suggestedSlug(newSlug)
-                .suggestedShortUrl(baseUrl + "/" + newSlug)
+                .suggestedShortUrl(buildShortUrl(newSlug))
                 .verificationToken(newToken)
                 .build();
     }
 
     // ── Confirm ──────────────────────────────────────────────────────────
-    @CacheEvict(value = "urls", key = "#request.slug")
     public ShortenResponse confirm(ConfirmShortenRequest request) {
 
         // Step 1 — verify slug was AI generated
@@ -104,14 +104,14 @@ public class UrlMappingService {
         );
 
         if (!isValidToken) {
-            throw new RuntimeException(
+            throw new ApiException(HttpStatus.BAD_REQUEST,
                     "Invalid verification token — slug was not AI generated");
         }
 
         // Step 2 — spam check
         boolean isSafe = aiService.checkIfSafe(request.getOriginalUrl());
         if (!isSafe) {
-            throw new RuntimeException("This URL has been flagged as unsafe");
+            throw new ApiException(HttpStatus.BAD_REQUEST, "This URL has been flagged as unsafe");
         }
 
         // Finish the external AI calls before opening a database creation transaction.
@@ -129,21 +129,26 @@ public class UrlMappingService {
     }
 
     // ── Redirect ─────────────────────────────────────────────────────────
-    @Cacheable(value = "urls", key = "#shortCode")
     @Transactional
     public String resolveShortCode(String shortCode) {
-        UrlMapping mapping = urlMappingRepository.findByShortCode(shortCode)
-                .orElseThrow(() -> new UrlNotFoundException(shortCode));
-
-        if (mapping.getExpiresAt() != null &&
-                mapping.getExpiresAt().isBefore(LocalDateTime.now())) {
-            throw new RuntimeException("This short URL has expired");
+        var target = urlLookupService.lookup(shortCode);
+        LocalDateTime now = LocalDateTime.now();
+        // This method runs even on cache hits, so expiry and counting are never skipped.
+        if (target.expiresAt() != null && !target.expiresAt().isAfter(now)) {
+            urlLookupService.evict(shortCode);
+            throw new ApiException(HttpStatus.GONE, "This short URL has expired");
         }
-
-        mapping.setClickCount(mapping.getClickCount() + 1);
-        urlMappingRepository.save(mapping);
-
-        return mapping.getOriginalUrl();
+        if (urlMappingRepository.incrementClickCount(target.id(), shortCode, now) == 0) {
+            urlLookupService.evict(shortCode);
+            var current = urlMappingRepository.findByShortCode(shortCode)
+                    .orElseThrow(() -> new UrlNotFoundException(shortCode));
+            if (current.getExpiresAt() != null && !current.getExpiresAt().isAfter(now)) {
+                throw new ApiException(HttpStatus.GONE, "This short URL has expired");
+            }
+            // A replaced mapping must be resolved again, rather than redirecting to stale data.
+            throw new UrlNotFoundException(shortCode);
+        }
+        return target.originalUrl();
     }
 
     // ── Debug ─────────────────────────────────────────────────────────────
@@ -160,7 +165,7 @@ public class UrlMappingService {
                 : List.of();
 
         return ShortenResponse.builder()
-                .shortUrl(baseUrl + "/api/urls/" + mapping.getShortCode())
+                .shortUrl(buildShortUrl(mapping.getShortCode()))
                 .originalUrl(mapping.getOriginalUrl())
                 .createdAt(mapping.getCreatedAt())
                 .expiresAt(mapping.getExpiresAt())
@@ -176,6 +181,10 @@ public class UrlMappingService {
                 .getName();
         return userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
+    }
+
+    private String buildShortUrl(String shortCode) {
+        return baseUrl.replaceAll("/+$", "") + "/api/urls/" + shortCode;
     }
 
 }

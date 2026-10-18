@@ -46,7 +46,7 @@ class AuthControllerTest {
     }
 
     @Test
-    @DisplayName("register with duplicate email returns 500")
+    @DisplayName("register with duplicate email returns 409")
     void register_duplicateEmail_returnsError() throws Exception {
         // Register first time
         mockMvc.perform(post("/api/auth/register")
@@ -68,7 +68,8 @@ class AuthControllerTest {
                             "password": "password123"
                         }
                         """))
-                .andExpect(status().isInternalServerError());
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("Email already registered"));
     }
 
     @Test

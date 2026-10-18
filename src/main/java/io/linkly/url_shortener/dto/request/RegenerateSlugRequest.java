@@ -1,6 +1,7 @@
 package io.linkly.url_shortener.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
+import io.linkly.url_shortener.validation.HttpUrl;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
@@ -20,6 +21,7 @@ public class RegenerateSlugRequest {
             regexp = "^(https?://).+",
             message = "URL must start with http:// or https://"
     )
+    @HttpUrl
     private String originalUrl;
 
     @NotBlank(message = "Previous slug must not be blank")

@@ -85,8 +85,9 @@ class UrlMappingControllerTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        cacheManager.getCache("urls").clear();
+        cacheManager.getCache("urlDestinations").clear();
         when(rateLimitService.isSuggestAllowed(anyLong())).thenReturn(true);
+        when(rateLimitService.isConfirmAllowed(anyLong())).thenReturn(true);
         when(rateLimitService.isRegenerateAllowed(anyLong())).thenReturn(true);
 
         // Register a user and get token before each test
@@ -124,7 +125,7 @@ class UrlMappingControllerTest {
         // Creation owns real transactions so collision retries can be tested after
         // rollback. Clean the isolated H2 database explicitly instead of wrapping
         // each test in a transaction that would hide users from REQUIRES_NEW.
-        cacheManager.getCache("urls").clear();
+        cacheManager.getCache("urlDestinations").clear();
         urlMappingRepository.deleteAll();
         userRepository.deleteAll();
     }
@@ -474,5 +475,57 @@ class UrlMappingControllerTest {
                 .shortCode(shortCode)
                 .originalUrl(originalUrl)
                 .build());
+    }
+    @Test
+    void previewUrlsUseTheActualRedirectRoute() throws Exception {
+        mockMvc.perform(post("/api/urls/suggest").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.suggestedShortUrl").value("http://localhost:8080/api/urls/" + TEST_SLUG));
+        mockMvc.perform(post("/api/urls/regenerate").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL,
+                                "previousSlug", TEST_SLUG, "verificationToken", slugVerificationUtil.generateToken(TEST_URL, TEST_SLUG)))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.suggestedShortUrl").value("http://localhost:8080/api/urls/baeldung-spring-tutorial"));
+    }
+
+    @Test void confirmationQuotaPreventsAiCallsAndWrites() throws Exception {
+        when(rateLimitService.isConfirmAllowed(anyLong())).thenReturn(false);
+        mockMvc.perform(post("/api/urls/confirm").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL, "slug", TEST_SLUG,
+                                "verificationToken", slugVerificationUtil.generateToken(TEST_URL, TEST_SLUG)))))
+                .andExpect(status().isTooManyRequests());
+        verify(aiService, org.mockito.Mockito.never()).checkIfSafe(anyString());
+        assertEquals(0, urlMappingRepository.count());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"https://", "https:///missing-host", "https://a b.com", "https://user:password@example.com", "https://example.com:99999"})
+    void malformedDestinationsAreRejectedBeforeAi(String url) throws Exception {
+        mockMvc.perform(post("/api/urls/suggest").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", url))))
+                .andExpect(status().isBadRequest());
+        verify(aiService, org.mockito.Mockito.never()).generateSlug(anyString());
+    }
+
+    @Test void deletedUserTokenReturnsJson401() throws Exception {
+        userRepository.deleteAll();
+        mockMvc.perform(get("/api/urls").header("Authorization", "Bearer " + token))
+                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.status").value(401));
+    }
+
+    @Test void aiOutageReturns503WithoutSavingMapping() throws Exception {
+        when(aiService.checkIfSafe(anyString())).thenThrow(new io.linkly.url_shortener.exception.ApiException(
+                org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, "AI service unavailable"));
+        mockMvc.perform(post("/api/urls/confirm").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("originalUrl", TEST_URL, "slug", TEST_SLUG,
+                                "verificationToken", slugVerificationUtil.generateToken(TEST_URL, TEST_SLUG)))))
+                .andExpect(status().isServiceUnavailable());
+        assertEquals(0, urlMappingRepository.count());
     }
 }

@@ -6,6 +6,9 @@ import io.linkly.url_shortener.dto.response.AuthResponse;
 import io.linkly.url_shortener.entity.User;
 import io.linkly.url_shortener.repository.UserRepository;
 import io.linkly.url_shortener.util.JwtUtil;
+import io.linkly.url_shortener.exception.ApiException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -24,7 +27,7 @@ public class AuthService {
     public AuthResponse register(RegisterRequest request) {
 
         if (userRepository.existsByEmail(request.getEmail())) {
-            throw new RuntimeException("Email already registered: " + request.getEmail());
+            throw new ApiException(HttpStatus.CONFLICT, "Email already registered");
         }
 
         User user = User.builder()
@@ -32,7 +35,15 @@ public class AuthService {
                 .password(passwordEncoder.encode(request.getPassword()))
                 .build();
 
-        userRepository.save(user);
+        try {
+            userRepository.save(user);
+        } catch (DataIntegrityViolationException ex) {
+            // The unique constraint handles registrations racing after the pre-check.
+            if (userRepository.existsByEmail(request.getEmail())) {
+                throw new ApiException(HttpStatus.CONFLICT, "Email already registered");
+            }
+            throw ex;
+        }
 
         String token = jwtUtil.generateToken(user.getEmail());
 

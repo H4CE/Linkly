@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: url-shortener
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:url_shortener}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      connect-timeout: 1s
+      timeout: 1s
+app:
+  base-url: ${APP_BASE_URL:http://localhost:8080}
+  jwt:
+    secret: ${JWT_SECRET}
+    expiry: ${JWT_EXPIRY:86400000}
+  verification:
+    secret: ${VERIFICATION_SECRET}
+  gemini:
+    api-key: ${GEMINI_API_KEY:}
+    api-url: ${GEMINI_API_URL:https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent}
+    max-slug-length: 30
+    max-tags: 5
+    timeout-seconds: ${GEMINI_TIMEOUT_SECONDS:15}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

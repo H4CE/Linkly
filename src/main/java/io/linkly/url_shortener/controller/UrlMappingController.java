@@ -101,6 +101,10 @@ public class UrlMappingController {
     )
     @PostMapping("/confirm")
     public ResponseEntity<ShortenResponse> confirm(@Valid @RequestBody ConfirmShortenRequest request) {
+        // Confirmation calls Gemini too; a signed slug must not bypass the AI quota.
+        if (!rateLimitService.isConfirmAllowed(getCurrentUserId())) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+        }
         ShortenResponse response = urlMappingService.confirm(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
