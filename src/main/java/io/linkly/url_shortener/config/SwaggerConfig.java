@@ -17,8 +17,9 @@ public class SwaggerConfig {
         return new OpenAPI()
                 .info(new Info()
                         .title("Linkly API")
-                        .description("AI-powered URL shortener with JWT authentication, " +
-                                "smart slug generation, spam detection, and auto-tagging")
+                        .description("URL shortener with JWT authentication, basic shortening without AI, " +
+                                "optional Gemini slug suggestions and content assessment, " +
+                                "user-owned link listing, and redirect click counts")
                         .version("1.0.0")
                         .contact(new Contact()
                                 .name("Harish")

@@ -1,8 +1,8 @@
 # Linkly API reference
 
-Examples match the current application code, including the URL-listing endpoint added in commit `cc4335f`.
+This reference covers authentication, basic shortening without AI, the optional AI flow, user-owned link listing, and public redirects. Example codes, metadata, and timestamps are illustrative.
 
-For local startup, follow the [README](../README.md). On Windows, `start-linkly.cmd` generates the required credentials, writes `.env`, and starts the Docker stack. A Gemini key is optional for basic shortening.
+For local startup, follow the [README](../README.md). On Windows, `start-linkly.cmd` prepares `.env`, starts the Docker stack, and keeps the window open with live app logs. Run `stop-linkly.cmd` in another window to stop the app, PostgreSQL, and Redis while retaining data. A Gemini key is optional for basic shortening.
 
 ## Base URL and request setup
 
@@ -48,7 +48,7 @@ The backend must be running with PostgreSQL available. Basic shortening uses Red
 | POST | `/api/urls/confirm` | Yes | `originalUrl`, `slug`, `verificationToken` | 201 |
 | GET | `/api/urls/{shortCode}` | No | None | 302 |
 
-Use **`/api/urls/suggest`**, not `/api/suggest`. There is no `/api/urls/shorten` endpoint or exposed custom-slug creation endpoint in the current code.
+Use **`/api/urls/shorten`** for basic creation and **`/api/urls/suggest`** for AI suggestions. There is no `/api/suggest` route or direct custom-slug creation endpoint.
 
 ## 1. Register a user
 
@@ -111,7 +111,7 @@ Both fields are required and nonblank. Email must have a valid email format. Use
 }
 ```
 
-Wrong credentials return 401. JWT lifetime is configured by `app.jwt.expiry`; the sample configuration uses 24 hours.
+Wrong credentials return 401. JWT lifetime is configured by `JWT_EXPIRY` / `app.jwt.expiry`; the tracked default is 24 hours. After signing secrets change, log in again to obtain a fresh token.
 
 ## 3. List the logged-in user's saved URLs
 
@@ -144,7 +144,7 @@ Authorization: Bearer <JWT>
 - No `userId` is accepted as an ownership selector. Adding another user's ID to a query does not change the authenticated owner.
 - Listing does not generate AI output or increment clicks.
 
-## Basic shortening without AI
+## 4. Basic shortening without AI
 
 ```http
 POST /api/urls/shorten
@@ -160,7 +160,11 @@ Required body:
 }
 ```
 
-This validates HTTP(S) URL syntax and creates a random 10-character Base62 code without fetching the destination or performing any content/spam assessment. It needs no Gemini key, suggested slug or verification token. The normal database collision handling remains authoritative, so a collision can append an ID suffix. Example response (generated code and timestamp vary):
+`originalUrl` is required and nonblank, with a maximum of 2,048 characters. It must parse as an HTTP(S) URL with a host, no embedded username/password, no raw whitespace, and no invalid port. Validation does not test destination reachability.
+
+Basic shortening creates a random 10-character Base62 code without fetching the destination or performing any content/spam assessment. It needs no Gemini key, suggested slug, or verification token. A collision can append an ID suffix.
+
+### Example response: 201 Created
 
 ```json
 {
@@ -180,7 +184,7 @@ The mapping belongs to the logged-in user and appears in `GET /api/urls`. Open i
 
 Basic shortening performs no content or spam check. A successful basic response does not mean the URL is safe; it may point to an unavailable website, download or private address, provided its URL syntax is valid.
 
-Only AI confirmation downloads HTML/plain text and passes up to 12,000 characters of prepared context to Gemini. That context includes extracted text plus HTML form/redirect/script excerpts. Gemini alone decides whether to approve or reject the content. Handwritten rules for password forms, wallet fields, suspicious scripts and file signatures have been removed.
+Only AI confirmation downloads HTML/plain text and passes up to 12,000 characters of prepared context to Gemini. That context includes extracted text plus HTML form/redirect/script excerpts. Gemini alone decides whether to approve or reject the content. The [interview guide](LINKLY_INTERVIEW_GUIDE.md) explains context preparation and downloader safeguards.
 
 For AI fetching, public HTTP(S) destinations on standard ports are required. DNS answers are validated and pinned, every HTTP redirect is validated, TLS verification stays enabled and caller credentials/cookies are not forwarded. Limits: 8 seconds total, 2-second connection/read timeouts, 3 HTTP redirects, 1 MiB decompressed body, 4 simultaneous fetches. `CONTENT_CHECK_TIMEOUT_SECONDS` changes the total deadline within 1-30 seconds. These are downloader safeguards, not local spam classification, and do not run in basic mode.
 
@@ -201,7 +205,7 @@ $basic = Invoke-RestMethod -Method Post -Uri "$baseUrl/api/urls/shorten" `
 $basic.shortUrl
 ```
 
-## 4. Request an AI slug suggestion
+## 5. Request an AI slug suggestion
 
 ```http
 POST http://localhost:8080/api/urls/suggest
@@ -217,7 +221,7 @@ Content-Type: application/json
 }
 ```
 
-`originalUrl` must be nonblank, start with `http://` or `https://`, and contain at most 2,048 characters. The implemented check is a prefix pattern, not a full URL/host validator.
+`originalUrl` must be nonblank, start with `http://` or `https://`, and contain at most 2,048 characters. It also undergoes HTTP(S) URL/host validation: malformed URLs, embedded credentials, raw whitespace, and invalid ports are rejected before calling Gemini. Suggestion does not download the destination.
 
 ### Example response: 200 OK
 
@@ -232,11 +236,11 @@ Content-Type: application/json
 
 Save `originalUrl`, `suggestedSlug`, and `verificationToken` together. They are needed for confirmation or regeneration. A suggestion does not save a URL mapping and does not reserve the slug.
 
-The preview uses the actual `/api/urls/<slug>` route. It becomes active only after successful confirmation; a collision can change the final code. Use the returned confirmed `shortUrl`.
+The preview uses the actual `/api/urls/<slug>` route but creates no mapping or reservation. If that code already exists, the preview can open the existing mapping. A collision can change the final code; use the confirmed `shortUrl` for your saved link.
 
 The current suggestion limit is **10 attempts per user per one-hour window**, beginning with the first request. Exceeding the limit returns 429 with an empty body. Requests that reach the limiter can consume an attempt even if subsequent AI work fails.
 
-## 5. Regenerate a suggestion (optional)
+## 6. Regenerate a suggestion (optional)
 
 ```http
 POST http://localhost:8080/api/urls/regenerate
@@ -275,7 +279,7 @@ For confirmation, use the regenerated slug together with its corresponding token
 
 Regeneration does not save a mapping. Its separate limit is **5 attempts per user per one-hour window**. Exceeding it returns 429 with an empty body. The backend verifies the slug changed; an unchanged or invalid provider response returns 503.
 
-## 6. Confirm and save a short link
+## 7. Confirm and save a short link
 
 ```http
 POST http://localhost:8080/api/urls/confirm
@@ -297,7 +301,7 @@ This example continues from the regenerated response above. If you skipped regen
 
 | Field | Validation / source |
 |---|---|
-| `originalUrl` | Required, nonblank, HTTP(S) prefix, maximum 2,048 characters; preserve the exact suggested URL |
+| `originalUrl` | Required, nonblank, valid HTTP(S) URL with a host and no embedded credentials/invalid port, maximum 2,048 characters; preserve the exact suggested URL |
 | `slug` | Copy `suggestedSlug`; required, nonblank, maximum 100 characters, letters/numbers/hyphens only |
 | `verificationToken` | Copy the token for this exact URL/slug pair; required and nonblank |
 
@@ -319,9 +323,12 @@ Do not send `previousSlug` here: confirmation uses the field name `slug`. Do not
 
 Confirmation verifies the HMAC token, fetches the page, prepares text/HTML excerpts, asks Gemini to assess the downloaded context, generates metadata, and saves the mapping with its owner. Tags can fall back to `[]` and category to `Uncategorized`. The current request does not accept an expiry setting, so newly created mappings normally have `expiresAt: null`.
 
-Invalid verification tokens, blocked fetch destinations and Gemini results interpreted as unsafe return 400. Unreadable AI-flow pages return 422, and fetch/network/deadline failures return 503. Gemini safety-check failure blocks creation with 503. Only an exact SAFE answer is accepted, ignoring case and outer whitespace; ambiguous responses such as NOT SAFE are rejected. Optional tagging failures fall back to empty tags and Uncategorized. If a slug is taken, creation appends a Base62 ID suffix, shortening the prefix if needed to keep the code within 100 characters. Each successful confirmation creates one mapping; conflicting writes are rolled back and retried up to three attempts. Repeated confirmation is not idempotent: it creates another link with a different code. Confirmation allows 10 attempted requests per user per hour; the independent suggest/regenerate quotas are 10 and 5. Counters include failed/rejected attempts after request-body validation. Quota exhaustion returns 429; unavailable Redis rate limiting returns 503 before Gemini is called.
+- Invalid verification tokens, blocked fetch targets, and rejected/ambiguous safety verdicts return **400**. Only the complete answer `SAFE` passes, ignoring case and outer whitespace.
+- Unreadable pages return **422**. Required fetching or AI service failures return **503** and prevent saving. Optional tagging failure uses fallback metadata after successful safety assessment.
+- A taken slug receives an ID-based suffix. Always use the returned `shortUrl`. One successful request creates one mapping; repeating confirmation is not idempotent and can create another suffixed link.
+- Confirmation allows **10 attempts per user per one-hour window**. Failed/rejected attempts reaching the limiter consume quota. Exhaustion returns **429**; an unavailable Redis limiter returns **503** before fetching or calling Gemini.
 
-## 7. Follow a saved short link
+## 8. Follow a saved short link
 
 ```http
 GET http://localhost:8080/api/urls/spring-boot-notes
@@ -340,7 +347,7 @@ There is no JSON response body. Browsers normally follow the redirect automatica
 
 An unknown code returns 404. Every successful redirect increments the database count atomically, including cache hits and concurrent requests. Expired links return 410 Gone without incrementing, even when the destination is cached. Cache errors fall back to PostgreSQL. Each redirect requires a database write; counts represent requests, not unique visitors.
 
-## 8. Health, metadata, and API documentation
+## 9. Health, metadata, and API documentation
 
 All requests in this section are GET requests with **no body**.
 
@@ -349,7 +356,6 @@ All requests in this section are GET requests with **no body**.
 | `http://localhost:8080/actuator/health` | No | Application/dependency health |
 | `http://localhost:8080/actuator/info` | No | Configured application metadata |
 | `http://localhost:8080/actuator/metrics` | Yes | Available metric names |
-| `http://localhost:8080/actuator/loggers` | Yes | Logger configuration information |
 | `http://localhost:8080/v3/api-docs` | No | OpenAPI JSON description |
 | `http://localhost:8080/swagger-ui.html` | No | Interactive Swagger UI in a browser |
 
@@ -357,9 +363,11 @@ Actuator endpoints must also be enabled/exposed by configuration. The tracked de
 
 In Swagger UI, register or log in, select **Authorize**, paste the JWT, and execute a protected endpoint. The global Swagger security scheme can show authorization controls even for public operations; the security rules above describe actual access requirements.
 
-## 9. Copyable PowerShell workflow
+## 10. Copyable PowerShell workflows
 
-Run the following from Windows PowerShell after registering an account. Change the email/password to your existing account. The script carries the real verification token forward automatically.
+### Basic demo: no Gemini key required
+
+Start Linkly and register an account using section 1. Then run this in another PowerShell window, using that account's email and password:
 
 ```powershell
 $baseUrl = 'http://localhost:8080'
@@ -377,9 +385,27 @@ $auth = Invoke-RestMethod -Method Post `
 
 $headers = @{ Authorization = "Bearer $($auth.token)" }
 
-# 2. Suggest a slug. This does not save the link yet.
+# 2. Create a basic link. No Gemini key or verification token is needed.
+$basicBody = @{ originalUrl = 'https://example.com' } | ConvertTo-Json
+$basic = Invoke-RestMethod -Method Post `
+    -Uri "$baseUrl/api/urls/shorten" `
+    -Headers $headers -ContentType 'application/json' -Body $basicBody
+$basic
+
+# 3. List saved links. Open the printed short URL in a browser, then list again
+# to see its click count increase.
+$basic.shortUrl
+Invoke-RestMethod -Method Get -Uri "$baseUrl/api/urls" -Headers $headers
+```
+
+### Optional AI flow
+
+Set `GEMINI_API_KEY` in the server's `.env` and rerun startup first. This example reuses `$baseUrl` and `$headers` from the login above. It carries the real verification token forward automatically and uses an actual public page; the article URLs in earlier examples are illustrative.
+
+```powershell
+# 1. Suggest a slug. This does not save the link yet.
 $suggestBody = @{
-    originalUrl = 'https://example.com/articles/spring-boot?source=linkly'
+    originalUrl = 'https://example.com'
 } | ConvertTo-Json
 
 $suggestion = Invoke-RestMethod -Method Post `
@@ -390,7 +416,7 @@ $suggestion = Invoke-RestMethod -Method Post `
 
 $suggestion
 
-# 3. Confirm using the actual URL, slug, and token returned above.
+# 2. Confirm using the actual URL, slug, and token returned above.
 $confirmBody = @{
     originalUrl = $suggestion.originalUrl
     slug = $suggestion.suggestedSlug
@@ -405,7 +431,7 @@ $saved = Invoke-RestMethod -Method Post `
 
 $saved
 
-# 4. List your saved links. No request body is needed.
+# 3. List your saved links. No request body is needed.
 Invoke-RestMethod -Method Get `
     -Uri "$baseUrl/api/urls" `
     -Headers $headers
@@ -414,7 +440,7 @@ Invoke-RestMethod -Method Get `
 $saved.shortUrl
 ```
 
-To regenerate before confirming, insert this optional block between steps 2 and 3. It replaces `$suggestion` with the new response, so step 3 uses the matching new slug and token:
+To regenerate before confirming, insert this optional block between the suggestion and confirmation requests. It replaces `$suggestion` with the new response so confirmation uses its matching slug and token:
 
 ```powershell
 $regenerateBody = @{
@@ -430,7 +456,7 @@ $suggestion = Invoke-RestMethod -Method Post `
     -Body $regenerateBody
 ```
 
-## 10. Common error responses and troubleshooting
+## 11. Common error responses and troubleshooting
 
 ### Missing authentication: 401
 
@@ -464,12 +490,12 @@ Example for an invalid URL:
 |---|---|---|
 | 400 | Invalid URL/body, invalid HMAC pair, blocked AI fetch destination, or Gemini rejection | Use the exact URL, slug, and matching token from one suggestion response |
 | 401 | Bad login credentials or missing/invalid JWT | Login credentials, Authorization header, fresh JWT |
-| 404 | Unknown saved short code | Use a link that was successfully confirmed |
+| 404 | Unknown saved short code | Use the URL returned by successful basic creation or AI confirmation |
 | 409 | Email already registered | Log in instead of registering again |
 | 410 | Short link expired | Request a new link |
 | 422 | AI-flow destination content could not be prepared | Use an accessible public HTML/plain-text page within the documented limits |
 | 429 | Basic shortening or suggestion/regeneration/confirmation quota exceeded | Wait for that user's one-hour window to expire |
-| 503 | Required AI operation, content fetch, or rate limiter unavailable | Destination connectivity/TLS, Gemini credentials/quota, Redis and scan capacity |
+| 503 | Required AI operation, content fetch, or rate limiter unavailable | Destination connectivity/TLS, Gemini credentials/quota, Redis and fetch capacity |
 | 500 | Database/unexpected failure or exhausted slug-allocation retry | Application logs and dependency connectivity |
 
 General runtime failures usually return:

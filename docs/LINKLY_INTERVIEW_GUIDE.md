@@ -41,6 +41,30 @@ The downloader and Gemini are used by AI confirmation. Basic shortening never do
 
 Code is organized into `controller` (HTTP), `service` (workflows), `repository` (database access), `entity` (stored data), `dto` (request/response/cache shapes), `config` (security/cache), `safety` (download/context preparation), `validation`, and `util`.
 
+The repository keeps its main entry points at the root and supporting material in folders:
+
+```text
+url-shortener/
+  README.md                    Overview and local startup
+  start-linkly.cmd              Start the Docker stack and follow app logs
+  stop-linkly.cmd               Stop this stack while retaining data
+  .env.example                 Credential template; .env stays private
+  docker-compose.yml           App, PostgreSQL and Redis services
+  dockerfile                   Java image build
+  pom.xml, mvnw, mvnw.cmd, .mvn/ Maven build and wrapper
+  docs/
+    API_REFERENCE.md           Request bodies and runnable workflows
+    LINKLY_INTERVIEW_GUIDE.md   Design, interview questions and reference
+  scripts/
+    start-linkly.ps1, stop-linkly.ps1
+    generate-secrets.cmd        Optional manual signing-secret helper
+    tests/Test-StartLinkly.ps1   Isolated Windows helper tests
+  src/main/                    Java code and application configuration
+  src/test/                    Java tests and isolated test settings
+```
+
+Commands in this guide assume the project root as the current directory. `target/` contains generated build/test output and is ignored by Git.
+
 ## 3. The four flows to understand
 
 ### Authentication and ownership
@@ -64,7 +88,7 @@ Validation checks HTTP(S) URL syntax, a host, valid ports, and absence of embedd
 2. **Regenerate, optional:** send the exact URL, previous slug, and its token. A different slug and new token are returned.
 3. **Confirm:** send the URL, selected slug, and matching token. The server verifies the signature, downloads permitted destination content, and asks Gemini whether it is safe. Only an accepted safety result permits creation. Tags/category are requested next, then one mapping is saved.
 
-Required fetch/AI failures prevent saving. Optional tagging failures fall back to empty tags and `Uncategorized`. The confirmed `shortUrl` is authoritative because a collision may change the code. A preview is inactive until a mapping is saved.
+Required fetch/AI failures prevent saving. Optional tagging failures fall back to empty tags and `Uncategorized`. A suggestion reserves no code and creates no mapping. Its preview may already resolve to someone else's existing mapping if that code is taken. Use the final confirmed `shortUrl`, which can change during collision handling.
 
 ### Redirect and count
 
@@ -189,6 +213,8 @@ Docker initializes the database password on the first run and stores database da
 
 **What happens when Gemini is down?** Basic creation works without calling Gemini. Required AI steps return `503` and do not save a mapping. A tagging failure alone uses fallback metadata after successful assessment.
 
+**Why does setup detect an old database after containers and images are deleted?** Docker volumes have their own lifecycle. The PostgreSQL volume can still contain the database files. Setup recognizes the Compose project's PostgreSQL container or named volume by labels; it does not query tables to prove that records exist.
+
 **Is a basic short link safe?** No safety claim is made. Basic mode validates URL structure only. AI mode assesses selected page content, which also cannot guarantee safety.
 
 **Can someone steal a JWT by reading it?** JWTs are bearer credentials: possession allows use until invalid/expired. Their payload is readable, while the signature prevents undetected modification without the signing key. Do not log or publish them.
@@ -200,6 +226,40 @@ Docker initializes the database password on the first run and stores database da
 **How did you test this?** Controller/service tests cover authentication, ownership, collisions, concurrent clicks, expiry, and dependency failures. Local mock HTTP servers test Gemini output handling and controlled page downloads without paid requests. Optional integration tests exercise actual PostgreSQL/Redis behavior. The setup helper has separate Windows tests.
 
 ## 9. Practical reference
+
+<details>
+<summary><strong>Docker storage, existing databases, and password recovery</strong></summary>
+
+Containers run the services, images provide their software, and volumes hold persistent files. PostgreSQL stores its files in the Compose `postgres-data` volume, normally named `url-shortener_postgres-data` for this project.
+
+| Action | Containers | PostgreSQL data |
+|---|---|---|
+| `stop-linkly.cmd` | Stopped and retained | Retained |
+| `docker compose down` | Removed, along with the project network | Retained |
+| Delete only containers/images | Removed items can be recreated | Retained if the volume remains |
+| Delete the PostgreSQL volume / `docker compose down -v` | Depends on the command | Permanently deleted |
+
+Setup checks Docker labels for this Compose project and either its `postgres` container (including stopped containers) or its `postgres-data` volume. It treats either as potentially existing data. It does not inspect SQL tables, detect a separately installed Windows database, or search other Compose projects. The project name comes from `COMPOSE_PROJECT_NAME` in the shell or `.env`, otherwise the normalized folder name; renaming the folder can change that identity.
+
+To reuse an existing database:
+
+1. Check the available containers and volumes with `docker ps -a` and `docker volume ls`.
+2. Keep the matching `DB_PASSWORD` in `.env`. If the old `linkly-postgres` container still exists, retrieve its configured password locally:
+
+   ```powershell
+   docker inspect linkly-postgres --format '{{range .Config.Env}}{{println .}}{{end}}' |
+       Select-String '^POSTGRES_PASSWORD='
+   ```
+
+   Copy only the value after `POSTGRES_PASSWORD=` into `DB_PASSWORD` in `.env`. The printed value is the configured password, not a masking label. It normally matches the database unless an administrator changed the database password later.
+3. Preserve existing JWT/verification secrets when available. Missing or template values are generated on startup. New secrets require logging in again and requesting fresh AI suggestions; they do not remove accounts or links.
+4. Run `.\start-linkly.cmd`. It reuses the volume and configured credentials.
+
+If the container was deleted but the volume remains, `docker inspect` cannot recover its former environment. Restore the password from the previous `.env` or a backup. The starter does not recover/reset a database password, and a newly generated password cannot unlock old data.
+
+For an intentionally empty demo database, stop the stack, remove its stopped PostgreSQL container, and delete only its PostgreSQL volume in Docker Desktop. **Deleting that volume permanently removes its users and saved links.** Rerun startup afterward. Keeping `.env` reuses configured credentials; an actually fresh setup generates missing/template credentials. No volume is deleted automatically by either CMD helper.
+
+</details>
 
 <details>
 <summary><strong>Run Java locally, with or without Docker services</strong></summary>

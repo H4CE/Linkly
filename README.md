@@ -44,6 +44,8 @@ docker compose logs -f app  # View application logs
 
 Double-click `stop-linkly.cmd` or run it in another terminal. It stops only this project's containers, preserving `.env` and database storage. Docker Desktop stays running. Closing the startup window alone leaves the containers running; use the stop script to shut down the stack. The startup log window ends when the app stops.
 
+Database data lives in a Docker volume, which can remain after containers and images are deleted. Keep the matching database password in `.env`; the interview guide covers existing-database detection and password recovery.
+
 Default host ports: **8080** for Linkly, **5433** for PostgreSQL, and **6380** for Redis. Keep these available. An existing standalone container named `linkly-redis` must also be stopped and renamed before Compose can use that name; see the guide's troubleshooting section. Avoid `docker compose down -v` unless you intend to delete the database.
 
 For manual Docker setup on another platform, copy `.env.example` to `.env`, replace `DB_PASSWORD`, `JWT_SECRET`, and `VERIFICATION_SECRET` with strong random values (at least 32 bytes per signing secret), and run `docker compose up --build -d`. The Gemini key is optional.

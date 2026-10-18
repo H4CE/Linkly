@@ -1,5 +1,6 @@
 # Optional local overrides. Defaults live in tracked application.yaml.
-# Configure environment variables as described in README.md.
+# Configure environment variables using docs/LINKLY_INTERVIEW_GUIDE.md (from project root).
+# Direct Java/IDE runs do not automatically read the project-root .env file.
 # Copy to application.properties only if you need overrides; never commit secrets.
 # This file takes precedence over YAML for matching property names.
 
